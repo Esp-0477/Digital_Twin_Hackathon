@@ -52,7 +52,7 @@
 \section{Introducción y Objetivos}
 Este documento detalla la fundamentación teórica, la metodología de adquisición de datos y la implementación en código de la \textbf{Fase 1} para el desarrollo del Gemelo Digital de un beamline de iones simulado en SIMION. La arquitectura propuesta está fuertemente inspirada en los trabajos de Rautela et al. (\textit{CBOL-Tuner} y \textit{Advancing Accelerator Virtual Beam Diagnostics through Latent Evolution Modeling}), adaptando la reducción de dimensionalidad en el espacio de fase mediante un Autoencoder Variacional (VAE) para emular la distribución espacial del haz en el detector.
 
-El objetivo principal de esta fase es comprimir el perfil espacial de iones en un espacio latente de baja dimensión ($z \in \mathbb{R}^2$), garantizando que las distribuciones representadas físicamente posibles vivan en un manifold suave y continuo, facilitando así la optimización en fases posteriores.
+El objetivo principal de esta fase es comprimir el perfil espacial de iones en un espacio latente de alta dimensión ($z \in \mathbb{R}^4$), garantizando que las distribuciones representadas físicamente posibles vivan en un manifold suave y continuo, facilitando así la optimización en fases posteriores.
 
 \section{Adquisición de Datos desde SIMION}
 Para simular el vuelo de los iones bajo diferentes voltajes de electrodos, se interactúa con el programa SIMION mediante su interfaz de comandos (CLI).
@@ -128,7 +128,7 @@ El histograma normalizado de dimensiones $(20, 20)$ se aplana a un vector unidim
 \end{itemize}
 
 \section{Fase 1: El Autoencoder Variacional (VAE)}
-El VAE es un modelo generativo que proyecta el vector de estado del haz de alta dimensión $X \in \mathbb{R}^{400}$ hacia una distribución en un espacio latente continuo $z \in \mathbb{R}^2$ de baja dimensionalidad.
+El VAE es un modelo generativo que proyecta el vector de estado del haz de alta dimensión $X \in \mathbb{R}^{400}$ hacia una distribución en un espacio latente continuo $z \in \mathbb{R}^4$ de baja dimensionalidad.
 
 \subsection{Arquitectura Neuronal}
 El modelo se compone de dos redes principales implementadas en PyTorch:
@@ -137,12 +137,12 @@ El modelo se compone de dos redes principales implementadas en PyTorch:
     \begin{equation}
         400 \xrightarrow{\text{Linear+BN+ReLU}} 256 \xrightarrow{\text{Linear+BN+ReLU}} 128 \xrightarrow{\text{Linear+BN+ReLU}} 64
     \end{equation}
-    A partir de la última capa oculta, se proyectan dos vectores de tamaño \texttt{latent\_dim} ($2$): el vector de medias $\mu_z$ y el logaritmo de la varianza $\log(\sigma_z^2)$.
-    \item \textbf{Decoder ($p_\theta(X|z)$)}: Recibe una muestra del espacio latente $z \in \mathbb{R}^2$ y la proyecta de vuelta:
+    A partir de la última capa oculta, se proyectan dos vectores de tamaño \texttt{latent\_dim} ($4$): el vector de medias $\mu_z$ y el logaritmo de la varianza $\log(\sigma_z^2)$.
+    \item \textbf{Decoder ($p_\theta(X|z)$)}: Recibe una muestra del espacio latente $z \in \mathbb{R}^4$ y la proyecta de vuelta:
     \begin{equation}
-        2 \xrightarrow{\text{Linear+BN+ReLU}} 64 \xrightarrow{\text{Linear+BN+ReLU}} 128 \xrightarrow{\text{Linear+BN+ReLU}} 256 \xrightarrow{\text{Linear}} 400 \xrightarrow{\text{Sigmoid}} \hat{X}
+        4 \xrightarrow{\text{Linear+BN+ReLU}} 64 \xrightarrow{\text{Linear+BN+ReLU}} 128 \xrightarrow{\text{Linear+BN+ReLU}} 256 \xrightarrow{\text{Linear}} 400 \xrightarrow{\text{Softmax}} \hat{X}
     \end{equation}
-    La salida de 400 dimensiones pasa por una función de activación \texttt{Sigmoid} para garantizar que las intensidades reconstruidas de las celdas se mantengan en el rango $[0, 1]$.
+    La salida de 400 dimensiones pasa por una función de activación \texttt{Softmax} para garantizar que las intensidades reconstruidas de las celdas se comporten como una distribución de probabilidad pura que sume exactamente $1.0$.
 \end{enumerate}
 
 \subsection{Truco de Reparametrización}
@@ -151,41 +151,42 @@ Para posibilitar el entrenamiento de extremo a extremo mediante el descenso de g
     z = \mu_z + \sigma_z \odot \epsilon = \mu_z + \exp\left(\frac{1}{2}\log(\sigma_z^2)\right) \odot \epsilon
 \end{equation}
 
-\subsection{Función de Pérdida y Corrección de Esparcidad}
-La pérdida total del VAE equilibra la calidad de la reconstrucción y la regularidad del espacio latente. 
-Originalmente se implementó una pérdida basada en el Error Cuadrático Medio ponderado (Weighted MSE) para contrarrestar la alta dispersión del haz. Sin embargo, dado que los histogramas están sumamente esparcidos (la mayoría de los píxeles son $0$ y los bins activos tienen valores de $0.002$ tras normalizar por el total de 500 iones), la pérdida de reconstrucción resultante era extremadamente pequeña ($\approx 10^{-5}$). En contraste, la pérdida de divergencia KL era del orden de $1.0$. Esta disparidad causó un \textbf{Colapso Posterior (Posterior Collapse)}, donde el optimizador ignoraba la reconstrucción y colapsaba el espacio latente hacia una distribución normal estándar ($\mu \rightarrow 0, \sigma \rightarrow 1$), decodificando siempre una salida constante que representaba el promedio plano del dataset ($\approx 0.51$ hits).
+\subsection{Función de Pérdida y Desacople de Transmisión}
+La pérdida total del VAE equilibra la calidad de la reconstrucción morfológica y la regularidad del espacio latente. 
 
-Para corregir este colapso, reemplazamos la pérdida de reconstrucción por **Entropía Cruzada Binaria (BCE)** promediada por lote:
+Originalmente, el modelo sufría de \textbf{Colapso Posterior (Posterior Collapse)} porque intentaba aprender conjuntamente la forma y la magnitud de transmisión de iones sobre histogramas altamente dispersos de celdas ruidosas individuales. Al estar acoplado el número de impactos, el VAE colapsaba decodificando perfiles planos y uniformes.
+
+Para resolver este problema, implementamos una separación física: el VAE ahora aprende exclusivamente la \textbf{forma normalizada (probabilística)} del haz. El decodificador utiliza una capa \texttt{Softmax} para que la suma de sus salidas sea $1.0$, y entrenamos la red utilizando la pérdida de \textbf{Entropía Cruzada Multiclase} (Categorical Cross-Entropy, CE):
 \begin{equation}
-    \mathcal{L}_{\text{BCE}} = -\frac{1}{B} \sum_{i=1}^B \sum_{j=1}^{400} \left[ X_{ij} \log \hat{X}_{ij} + (1 - X_{ij}) \log (1 - \hat{X}_{ij}) \right]
+    \mathcal{L}_{\text{CE}} = -\frac{1}{B} \sum_{i=1}^B \sum_{j=1}^{400} X_{ij} \log \hat{X}_{ij}
 \end{equation}
-La pérdida BCE penaliza de forma logarítmica tanto los falsos negativos como los falsos positivos, lo que la hace altamente sensible a los valores pequeños en distribuciones dispersas.
+Esta función penaliza fuertemente las discrepancias de distribución de probabilidad en perfiles discretizados suaves.
 
 La pérdida total combinada del VAE se define entonces como:
 \begin{equation}
-    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE}} + \beta \mathcal{L}_{\text{KL}}
+    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{CE}} + \beta \mathcal{L}_{\text{KL}}
 \end{equation}
 \begin{itemize}
     \item \textbf{Divergencia de Kullback-Leibler ($\mathcal{L}_{\text{KL}}$):} Fuerza a que la distribución latente se aproxime a una normal estándar $\mathcal{N}(0, I)$, previniendo sobreajustes y garantizando suavidad:
     \begin{equation}
         \mathcal{L}_{\text{KL}} = -\frac{1}{2 B} \sum_{b=1}^{B} \sum_{k=1}^{D} \left( 1 + \log(\sigma_{b,k}^2) - \mu_{b,k}^2 - \exp(\log(\sigma_{b,k}^2)) \right)
     \end{equation}
-    \item \textbf{Beta-VAE ($\beta$):} Parámetro ponderador (ajustado a $0.005$) para balancear la precisión de reconstrucción frente a la regularidad del espacio latente.
+    \item \textbf{Beta-VAE ($\beta$):} Parámetro ponderador (ajustado a $0.005$) para balancear la precisión de reconstrucción de forma frente a la regularidad del espacio latente 4D.
 \end{itemize}
 
 \section{Base de Código Implementada}
 El desarrollo del proyecto se estructura en la carpeta \texttt{src/phase\_1\_VAE/} con los siguientes códigos:
 
 \begin{enumerate}
-    \item \textbf{\texttt{vae.py}}: Contiene la definición modular de PyTorch para las clases \texttt{Encoder}, \texttt{Decoder} y el módulo consolidado \texttt{VAE}.
-    \item \textbf{\texttt{dataset.py}}: Centraliza el procesamiento de datos. Incluye el parseo del stdout de SIMION, la construcción de histogramas 2D normalizados y la clase \texttt{BeamlineDataset} que normaliza los voltajes en el rango $[-1, 1]$ a partir de sus límites físicos.
-    \item \textbf{\texttt{collect\_data.py} y \texttt{collect\_data\_optimized.py}}: El primero lee el archivo \texttt{beamline\_results.csv} de la carpeta \texttt{Hackathon\_student}, realiza la simulación en SIMION para cada configuración de voltajes mediante llamadas CLI rápidas y compila los histogramas, guardando el dataset final en un formato comprimido de NumPy: \texttt{beamline\_dataset.npz}. El segundo es un módulo optimizado que compara las configuraciones con el dataset previamente compilado en el archivo \texttt{.npz} y, si ya fueron simuladas en el pasado, reutiliza los histogramas calculados para evitar ejecuciones de SIMION innecesarias, reduciendo el tiempo de regeneración del dataset de 20 minutos a menos de 10 segundos.
-    \item \textbf{\texttt{train\_vae.py}}: Gestiona el entrenamiento. Lee el archivo \texttt{beamline\_dataset.npz}, separa los datos en entrenamiento y validación (80/20) para evitar fuga de datos (data leakage). Balancea el set de entrenamiento sobremuestreando de forma adaptativa las muestras que contienen impactos positivos frente a las vacías (evitando colapsar en la clase mayoritaria). Implementa la pérdida BCE y entrena por 1200 épocas en GPU/CUDA, guardando el mejor modelo en \texttt{vae\_model.pt}.
+    \item \textbf{\texttt{vae.py}}: Contiene la definición modular de PyTorch para las clases \texttt{Encoder}, \texttt{Decoder} y el módulo consolidado \texttt{VAE}. Se utiliza una activación final \texttt{Softmax} para modelar la forma.
+    \item \textbf{\texttt{dataset.py}}: Centraliza el procesamiento de datos. Realiza el parseo de SIMION, la construcción de histogramas, el filtrado de detección, el suavizado espacial por filtro Gaussiano ($\sigma=0.8$) y la clase \texttt{BeamlineDataset} que normaliza voltajes en el rango $[-1, 1]$ y retorna la tupla de 3 elementos: voltajes, histograma probabilístico normalizado y transmisión escalar.
+    \item \textbf{\texttt{collect\_data.py} y \texttt{collect\_data\_optimized.py}}: El primero lee el archivo \texttt{beamline\_results.csv} de la carpeta \texttt{Hackathon\_student}, realiza la simulación en SIMION y compila los histogramas en \texttt{beamline\_dataset.npz}. El segundo es un módulo optimizado que evita simulaciones duplicadas de SIMION reutilizando los datos históricos compilados.
+    \item \textbf{\texttt{train\_vae.py}}: Gestiona el entrenamiento del VAE. Lee el archivo \texttt{beamline\_dataset.npz}, filtra el dataset para entrenar \textbf{únicamente sobre las muestras que registran impactos} ($T > 0$), aplica la pérdida de Entropía Cruzada Multiclase y guarda los pesos del mejor modelo en \texttt{vae\_model.pt}.
 \end{enumerate}
 
 \section{Resultados del Entrenamiento y Reconstrucción}
-El dataset de entrenamiento se expandió exitosamente en segundo plano hasta alcanzar \textbf{106 muestras}, con \textbf{36 muestras} que contienen impactos no nulos (hits $> 0$) y un máximo de \textbf{175 impactos} (frente a las 50 muestras y 6 aciertos iniciales). El proceso de balanceo de datos en \texttt{train\_vae.py} sobremuestreó adaptativamente las muestras con impactos exitosos para equilibrar el conjunto de datos de entrenamiento.
+El dataset consolidado cuenta con 486 trials totales, de los cuales 41 presentan impactos válidos ($T > 0$) con un máximo de 174 impactos (Trial 104). 
 
-Se entrenó el VAE sobre este dataset balanceado utilizando la función de pérdida de Entropía Cruzada Binaria (BCE) por 1200 épocas en GPU/CUDA. La transición a la función de pérdida BCE resolvió por completo el colapso posterior. El espacio latente aprendido $z \in \mathbb{R}^2$ se expandió activamente a lo largo de un rango dinámico suave en $[-3.5, +3.5]$ (en lugar de concentrarse en $\approx 0$), permitiendo representaciones latentes claras para perfiles con distintas transmisiones y enfoques. Las reconstrucciones ahora son sumamente precisas, logrando reconstruir picos localizados de intensidad en total correspondencia espacial con las mediciones reales del detector (por ejemplo, una muestra real de 6 hits reconstruye un haz equivalente a 9 hits, y una de 49 reconstruye un haz de 26 hits). Esto garantiza un manifold latente continuo y físicamente coherente para las fases de control.
+Se entrenó el VAE únicamente sobre los perfiles suavizados de las muestras con impactos exitosos, utilizando la función de pérdida de Entropía Cruzada Multiclase por 1200 épocas en GPU/CUDA. La transición a un espacio latente de 4 dimensiones ($z \in \mathbb{R}^4$) y el desacoplamiento de la transmisión resolvieron por completo el colapso posterior. El espacio latente aprendido se estructuró de forma suave, expandiéndose sobre límites uniformes y continuos. Las reconstrucciones geométricas son ahora sumamente nítidas, logrando reproducir haces enfocados en total correspondencia con los perfiles reales de SIMION, lo cual provee un manifold latente de excelente diferenciabilidad para las tareas de optimización subsiguientes.
 
 \end{document}

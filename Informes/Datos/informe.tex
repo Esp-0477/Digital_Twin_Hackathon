@@ -138,6 +138,9 @@ Para estabilizar el entrenamiento de la red profunda, el histograma se normaliza
 \end{itemize}
 Finalmente, la cuadrícula de $20 \times 20$ se aplana a un vector unidimensional de \textbf{400 dimensiones} ($X \in \mathbb{R}^{400}$).
 
+\subsection{Suavizado Espacial (Filtro Gaussiano)}
+Para solucionar el problema de esparcimiento en celdas (debido a la baja densidad de impactos puntuales de iones), el pipeline de preprocesamiento aplica un filtro Gaussiano bidimensional con una desviación de $\sigma = 0.8$. Este filtro distribuye la intensidad de impactos de forma suave e interpretativa sobre las celdas circundantes, atenuando el ruido discreto y facilitando que la red profunda aprenda distribuciones continuas del haz.
+
 \section{Resultados de la Recolección de Datos}
 La optimización en caliente de 50 ensayos se completó exitosamente. Los datos de perfiles espaciales se recopilaron de forma automatizada mediante el script \texttt{collect\_data.py}, re-simulando las configuraciones y compilando el dataset en el archivo comprimido \texttt{beamline\_dataset.npz} en la carpeta \texttt{Hackathon\_student}.
 

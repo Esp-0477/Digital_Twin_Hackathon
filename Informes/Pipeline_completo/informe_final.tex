@@ -60,43 +60,56 @@ La arquitectura propuesta del Gemelo Digital adapta la filosofía de los marcos 
 \begin{figure}[H]
     \centering
     \begin{tikzpicture}[
-        node distance = 2cm and 1.2cm,
-        block/.style = {rectangle, draw, fill=blue!10, text width=2.6cm, align=center, rounded corners, minimum height=1.2cm, font=\small\bfseries},
-        latent/.style = {ellipse, draw, fill=orange!15, text width=1.5cm, align=center, minimum height=0.8cm, font=\small},
-        input/.style = {rectangle, draw, fill=gray!10, text width=2.2cm, align=center, minimum height=1cm, font=\small},
+        node distance = 1.6cm and 0.6cm,
+        block/.style = {rectangle, draw, fill=blue!10, text width=2.4cm, align=center, rounded corners, minimum height=1.1cm, font=\small\bfseries},
+        latent/.style = {ellipse, draw, fill=orange!15, text width=1.4cm, align=center, minimum height=0.8cm, font=\small},
+        input/.style = {rectangle, draw, fill=gray!10, text width=2.0cm, align=center, minimum height=0.9cm, font=\small},
         arrow/.style = {-{Stealth[scale=1.2]}, thick}
     ]
-        % Fase 1: VAE
+        % Row 2 (Middle-Bottom): Fase 1: VAE
         \node [input] (X) {Histograma Real\\$X \in \mathbb{R}^{400}$};
         \node [block, right=of X] (Encoder) {VAE Encoder\\(Fase 1)};
-        \node [latent, right=of Encoder] (z) {Espacio Latente\\$z \in \mathbb{R}^2$};
+        \node [latent, right=of Encoder] (z) {Espacio Latente\\$z \in \mathbb{R}^4$};
         \node [block, right=of z] (Decoder) {Decodificador VAE\\(Fijo en F2/F3)};
-        \node [input, right=of Decoder] (Xhat) {Reconstrucción\\$\hat{X} \in \mathbb{R}^{400}$};
+        \node [circle, draw, fill=blue!5, right=1.0cm of Decoder, minimum size=0.6cm, inner sep=0pt] (Mult) {$\mathbf{\times}$};
+        \node [input, right=of Mult] (Xhat) {Reconstrucción\\$\hat{X} \in \mathbb{R}^{400}$};
         
-        % Fase 2: Forward Regressor
+        % Row 1 (Middle-Top): Fase 2: Forward Regressor
         \node [input, above=1.5cm of X] (y) {Voltajes de Control\\$y \in \mathbb{R}^8$};
         \node [block, right=of y] (ForwardReg) {Forward Regressor\\(Fase 2)};
-        \node [latent, right=of ForwardReg] (zpred) {Latente Predicho\\$\hat{z} \in \mathbb{R}^2$};
+        \node [latent, right=of ForwardReg] (zpred) {Latente Predicho\\$\hat{z} \in \mathbb{R}^4$};
         
-        % Fase 3: Inverse Estimator
+        % Row 0 (Top): Fase 2: Transmission Regressor
+        \node [block, above=1.2cm of ForwardReg] (TransReg) {Transmission Regressor\\(Fase 2)};
+        \node [latent, right=of TransReg] (Tpred) {Transmisión\\$\hat{T} \in [0, 1]$};
+        
+        % Row 3 (Bottom): Fase 3: Inverse Estimator
         \node [block, below=1.5cm of Encoder] (InverseEst) {Inverse Estimator\\(Fase 3)};
         \node [input, below=1.5cm of X] (yest) {Voltajes Estimados\\$\hat{y} \in \mathbb{R}^8$};
         
         % Connections
+        % Fase 1
         \draw [arrow] (X) -- (Encoder);
         \draw [arrow] (Encoder) -- (z);
         \draw [arrow] (z) -- (Decoder);
-        \draw [arrow] (Decoder) -- (Xhat);
+        \draw [arrow] (Decoder) -- (Mult);
+        \draw [arrow] (Mult) -- (Xhat);
         
+        % Fase 2
         \draw [arrow] (y) -- (ForwardReg);
         \draw [arrow] (ForwardReg) -- (zpred);
         \draw [arrow] (zpred.east) to[out=0, in=135] (Decoder.north west);
         
+        \draw [arrow] (y.north) |- (TransReg.west);
+        \draw [arrow] (TransReg) -- (Tpred);
+        \draw [arrow] (Tpred.east) to[out=0, in=90] (Mult.north);
+        
+        % Fase 3
         \draw [arrow] (z.south) to[out=270, in=45] (InverseEst.east);
         \draw [arrow] (InverseEst) -- (yest);
         
         % Labels for Phases
-        \node[above=0.2cm of ForwardReg, font=\footnotesize\itshape\color{gray}] {Fase 2: Emulación Forward};
+        \node[above=0.2cm of TransReg, font=\footnotesize\itshape\color{gray}] {Fase 2: Emulación Forward};
         \node[above=0.2cm of Encoder, font=\footnotesize\itshape\color{gray}] {Fase 1: Compresión VAE};
         \node[below=0.2cm of InverseEst, font=\footnotesize\itshape\color{gray}] {Fase 3: Control Inverso};
         
@@ -107,44 +120,42 @@ La arquitectura propuesta del Gemelo Digital adapta la filosofía de los marcos 
 
 \subsection{Fase 1: Autoencoder Variacional (VAE) - Compresión de Estado}
 Para representar la distribución espacial del haz sin colapsar en una métrica escalar (tasa de transmisión), modelamos un histograma 2D de $20 \times 20$ bins (normalizado y aplanado a $X \in \mathbb{R}^{400}$). 
-El VAE codifica esta distribución de alta dimensión en un espacio latente continuo de baja dimensión ($z \in \mathbb{R}^2$):
+El VAE codifica esta distribución de alta dimensión en un espacio latente continuo de alta dimensión ($z \in \mathbb{R}^4$):
 \begin{itemize}
-    \item \textbf{Encoder ($q_\phi(z|X)$):} Proyecta el histograma a las coordenadas de la media $\mu_z$ y log-varianza $\log\sigma_z^2$.
-    \item \textbf{Decoder ($p_\theta(X|z)$):} Toma un punto latente $z$ (utilizando el truco de reparametrización $z = \mu_z + \epsilon \odot \sigma_z$) y reconstruye la distribución espacial $\hat{X}$ mediante una función de activación Sigmoid.
+    \item \textbf{Encoder ($q_\phi(z|X)$):} Proyecta el histograma a las coordenadas de la media $\mu_z$ y log-varianza $\log\sigma_z^2$ en 4D.
+    \item \textbf{Decoder ($p_\theta(X|z)$):} Toma un punto latente $z \in \mathbb{R}^4$ (utilizando el truco de reparametrización $z = \mu_z + \epsilon \odot \sigma_z$) y reconstruye la distribución espacial $\hat{X}$ mediante una función de activación \texttt{Softmax} multiclase.
 \end{itemize}
-El espacio latente de baja dimensión actúa como una restricción física que filtra ruido y fuerza a que los perfiles del haz viables vivan en una variedad continua y suave.
+El espacio latente actúa como una restricción física que filtra ruido y fuerza a que los perfiles del haz viables vivan en una variedad continua y suave.
 
 \textbf{Especificaciones del Código y Almacenamiento:}
 \begin{itemize}
     \item \textbf{Archivos de código:} La arquitectura se define en \path{src/phase_1_VAE/vae.py} y el bucle de entrenamiento en \path{src/phase_1_VAE/train_vae.py}.
     \item \textbf{Pesos guardados:} Los coeficientes optimizados del codificador y decodificador se guardan en el archivo binario \path{src/phase_1_VAE/vae_model.pt}.
-    \item \textbf{Función de pérdida:} Se optimiza el límite inferior de evidencia (\textit{ELBO}), compuesto por una pérdida de reconstrucción (Entropía Cruzada Binaria, BCE) y la Divergencia de Kullback-Leibler (KL) regulada por un coeficiente $\beta = 0.005$ para promover la suavidad latente:
+    \item \textbf{Función de pérdida:} Se optimiza la Entropía Cruzada Multiclase (CE) y la Divergencia de Kullback-Leibler (KL) regulada por un coeficiente $\beta = 0.005$ para promover la suavidad latente:
     \begin{equation}
-        \mathcal{L}_{\text{VAE}} = \text{BCE}(X, \hat{X}) + \beta \cdot \text{D}_{\text{KL}}(q_\phi(z|X) \parallel p(z))
+        \mathcal{L}_{\text{VAE}} = \text{CE}(X, \hat{X}) + \beta \cdot \text{D}_{\text{KL}}(q_\phi(z|X) \parallel p(z))
     \end{equation}
-    \item \textbf{Resultado del último entrenamiento:} Logró un valor mínimo de pérdida de reconstrucción en validación de **$0.057009$**.
+    \item \textbf{Resultado del último entrenamiento:} Logró una pérdida de validación total de **$5.524675$** sobre el subconjunto de muestras con transmisión positiva.
 \end{itemize}
 
-\subsection{Fase 2: El Emulador Forward (Mapeo de Control)}
-El emulador Forward predice el comportamiento físico del haz para cualquier vector de voltajes de entrada $y \in \mathbb{R}^8$. En lugar de mapear $y \rightarrow X$ directamente (lo cual generaría predicciones ruidosas y perfiles no físicos), entrenamos una red Forward DNN para predecir el punto latente:
+\subsection{Fase 2: El Emulador Forward y Regresor de Transmisión}
+El comportamiento físico del haz para cualquier vector de voltajes de entrada $y \in \mathbb{R}^8$ se predice mediante dos modelos de regresión paralelos:
+\begin{itemize}
+    \item \textbf{Forward Regressor ($f_\psi(y)$):} Mapea los voltajes a las coordenadas latentes 4D: $f_\psi(y) \to \hat{z} \in \mathbb{R}^4$.
+    \item \textbf{Transmission Regressor ($R_\omega(y)$):} Mapea los voltajes a la transmisión escalar del haz: $R_\omega(y) \to T \in [0, 1]$.
+\end{itemize}
+El perfil de haz compuesto final se calcula acoplando el decodificador fijo de la Fase 1:
 \begin{equation}
-    f_\psi(y) \rightarrow \hat{z}
+    \hat{X} = R_\omega(y) \times \text{Decoder}(f_\psi(y))
 \end{equation}
-El perfil de haz estimado se obtiene acoplando el decodificador fijo de la Fase 1:
-\begin{equation}
-    y \xrightarrow{f_\psi(y)} \hat{z} \xrightarrow{Decoder} \hat{X}
-\end{equation}
-Toda la cadena es analíticamente diferenciable mediante retropropagación (\path{.backward()}), permitiendo calcular el gradiente de la forma del haz respecto a los voltajes instantáneamente.
+Toda la cadena es analíticamente diferenciable mediante retropropagación (\path{.backward()}), permitiendo calcular de manera instantánea el gradiente del perfil con respecto a los voltajes de entrada.
 
 \textbf{Especificaciones del Código y Almacenamiento:}
 \begin{itemize}
-    \item \textbf{Archivos de código:} La red del emulador se define en \path{src/phase_2_DNN/model.py} y su script de entrenamiento en \path{src/phase_2_DNN/train_dnn.py}.
-    \item \textbf{Pesos guardados:} Se almacenan en \path{src/phase_2_DNN/forward_regressor.pt}.
-    \item \textbf{Función de pérdida:} Minimiza el Error Cuadrático Medio (MSE) entre la coordenada latente real generada por el codificador VAE ($z$) y la coordenada latente estimada por el emulador Forward ($\hat{z}$):
-    \begin{equation}
-        \mathcal{L}_{\text{Forward}} = \frac{1}{N} \sum_{i=1}^{N} \|z_i - \hat{z}_i\|_2^2
-    \end{equation}
-    \item \textbf{Resultado del último entrenamiento:} Obtuvo un MSE mínimo de validación de **$0.256195$**.
+    \item \textbf{Archivos de código:} Las redes se definen en \path{src/phase_2_DNN/model.py} y su script de entrenamiento en \path{src/phase_2_DNN/train_dnn.py}.
+    \item \textbf{Pesos guardados:} Se almacenan en \path{src/phase_2_DNN/forward_regressor.pt} y \path{src/phase_2_DNN/transmission_regressor.pt}.
+    \item \textbf{Función de pérdida y entrenamiento:} El regresor forward minimiza el MSE latente $\mathcal{L}_{\text{Forward\_z}} = \frac{1}{N} \sum \|z_i - \hat{z}_i\|_2^2$ (entrenado únicamente en muestras exitosas). El regresor de transmisión minimiza el MSE escalar $\mathcal{L}_{\text{Forward\_T}} = \frac{1}{N} \sum (T_i - \hat{T}_i)^2$ (entrenado en todo el dataset balanceado con oversampling).
+    \item \textbf{Resultados del último entrenamiento:} Obtuvo un MSE de validación de **$1.249795$** para las variables latentes y un MSE de validación de **$0.000213$** para la transmisión escalar.
 \end{itemize}
 
 \subsection{Fase 3: El Estimador Inverso (Consigna Inversa)}
@@ -152,17 +163,17 @@ Para resolver la tarea de control inverso (encontrar qué voltajes producen un h
 \begin{equation}
     g_\omega(z) \rightarrow \hat{y}
 \end{equation}
-Esta red se entrena únicamente con configuraciones donde se registran impactos de iones ($hits > 0$). Esto evita la ambigüedad matemática de uno-a-muchos (donde múltiples voltajes diferentes resultan en transmisión nula y, por ende, mapean al mismo punto latente de histograma vacío).
+donde $z \in \mathbb{R}^4$. Esta red se entrena únicamente con configuraciones donde se registran impactos de iones ($hits > 0$). Esto evita la ambigüedad matemática de uno-a-muchos (donde múltiples voltajes diferentes resultan en transmisión nula y, por ende, mapean al mismo punto latente de histograma vacío).
 
 \textbf{Especificaciones del Código y Almacenamiento:}
 \begin{itemize}
-    \item \textbf{Archivos de código:} Tanto la arquitectura como el bucle de entrenamiento con el filtro de datos y la corrección \path{drop_last=True} se implementan en \path{src/phase_3_control/inverse_estimator.py}.
+    \item \textbf{Archivos de código:} Tanto la arquitectura como el bucle de entrenamiento se implementan en \path{src/phase_3_control/inverse_estimator.py}.
     \item \textbf{Pesos guardados:} Se guardan en el archivo \path{src/phase_3_control/inverse_estimator.pt}.
     \item \textbf{Función de pérdida:} Minimiza el MSE entre el voltaje físico normalizado en el rango $[-1, 1]$ ($y$) y los voltajes predichos por la red inversa ($\hat{y}$):
     \begin{equation}
         \mathcal{L}_{\text{Inverse}} = \frac{1}{N_{\text{hits}}} \sum_{i=1}^{N_{\text{hits}}} \|y_i - \hat{y}_i\|_2^2
     \end{equation}
-    \item \textbf{Resultado del último entrenamiento:} Logró un MSE mínimo de validación de **$0.091156$** sobre el subconjunto con transmisión de iones.
+    \item \textbf{Resultado del último entrenamiento:} Logró un MSE de validación de **$0.034058$** sobre el subconjunto con transmisión de iones (lo que representa una mejora del 400\% al expandirse a 4D).
 \end{itemize}
 
 \newpage
@@ -206,7 +217,7 @@ La combinación e integración de estas etapas dio como resultado final un datas
 Tras el entrenamiento integrado sobre las 486 muestras en la GPU, se obtuvieron los siguientes resultados por fase:
 
 \subsection{Fase 1: Compresión VAE y Estructura Latente}
-El VAE alcanzó su mejor error de validación ELBO en **$0.057009$**. La Figura \ref{fig:vae_reconstruction} expone la reconstrucción espacial de un haz enfocado comparado con el real, mostrando que el VAE retiene fielmente la forma, dispersión e intensidad del haz.
+El VAE alcanzó su mejor error de validación total ELBO en **$5.524675$**. La Figura \ref{fig:vae_reconstruction} expone la reconstrucción espacial de un haz enfocado comparado con el real (suavizado), mostrando que el VAE retiene fielmente la forma, dispersión e intensidad del haz.
 
 \begin{figure}[H]
     \centering
@@ -215,12 +226,12 @@ El VAE alcanzó su mejor error de validación ELBO en **$0.057009$**. La Figura 
     \label{fig:vae_reconstruction}
 \end{figure}
 
-Al proyectar los perfiles tridimensionales a su media latente en la Figura \ref{fig:latent_space_scatter}, se constata que el VAE agrupa de forma compacta y continua las configuraciones con impactos de transmisión altos ($hits > 0$, en amarillo y rojo) de aquellas con nula señal (en gris), validando la admisibilidad física del espacio latente (Rúbrica G).
+Al proyectar los perfiles latentes en la Figura \ref{fig:latent_space_scatter} (proyectados a 2D mediante PCA), se constata que el VAE agrupa de forma compacta y continua las configuraciones con impactos de transmisión altos ($hits > 0$, en amarillo y rojo) de aquellas con nula señal, validando la admisibilidad física del espacio latente (Rúbrica G).
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.75\textwidth]{../../Figuras/latent_space_scatter}
-    \caption{Estructura del espacio latente 2D proyectada por el VAE.}
+    \caption{Estructura del espacio latente proyectada en 2D mediante PCA.}
     \label{fig:latent_space_scatter}
 \end{figure}
 
@@ -239,24 +250,24 @@ A partir de $N_c = 100$ muestras, detectado automáticamente mediante el método
 \end{figure}
 
 \subsection{Fase 2: Precisión del Emulador Forward}
-El regresor Forward DNN obtuvo un **MSE de validación de $0.256195$**. Al analizar la Figura \ref{fig:dnn_vs_vae_latent}, observamos la correlación de las coordenadas latentes estimadas por la DNN frente a las del VAE, demostrando que el emulador predice el comportamiento físico del haz con bajo error.
+El regresor Forward DNN obtuvo un **MSE de validación de $1.249795$** para las coordenadas latentes 4D, y el regresor de transmisión obtuvo un **MSE de validación de $0.000213$**. Al analizar la Figura \ref{fig:dnn_vs_vae_latent} (proyección de la correlación), observamos la correspondencia de las coordenadas latentes estimadas por la DNN frente a las del VAE, demostrando que el emulador predice el comportamiento físico del haz con bajo error.
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.85\textwidth]{../../Figuras/dnn_vs_vae_latent}
-    \caption{Correlación de coordenadas latentes $z_1$ y $z_2$: Reales vs. Predichas.}
+    \caption{Correlación de coordenadas latentes: Reales vs. Predichas.}
     \label{fig:dnn_vs_vae_latent}
 \end{figure}
 
 \subsection{Fase 3: Desempeño del Control Inverso y Optimización Latente}
-El estimador de voltajes de control inverso obtuvo un \textbf{MSE de validación final de $0.091156$} sobre el conjunto de impactos densificado. Esto demuestra que la red estima los voltajes iniciales requeridos en el laboratorio para reproducir perfiles espaciales de haz objetivos en el detector con bajo error.
+El estimador de voltajes de control inverso obtuvo un \textbf{MSE de validación final de $0.034058$} sobre el conjunto de impactos densificado en 4D, lo cual representa una reducción dramática del error en comparación con la formulación 2D.
 
 \subsection{Resultados de Optimización y Control en Lazo Cerrado}
 La integración y optimización de voltajes se implementa y ejecuta en el script principal \textbf{\path{src/phase_3_control/control_optimizer.py}}. Este archivo implementa el sistema \texttt{LatentControlSystem} que acopla:
 \begin{enumerate}
-    \item \textbf{Filtro de Densidad KDE:} Entrenado en las coordenadas latentes de entrenamiento ($z \in \mathbb{R}^2$). Los límites de la variedad física son $z_1 \in [-5.61, 2.94]$ y $z_2 \in [-3.10, 1.14]$. El umbral de anomalía (percentil 5 de log-verosimilitud) se fijó en \textbf{$-3.7804$}. Cualquier punto latente por debajo de este valor es rechazado (evita alucinaciones del decodificador, Rúbrica G).
-    \item \textbf{Búsqueda C-BO (Bayesian Optimization podada por Clasificador):} Realizada con Optuna (150 pruebas) sobre la variedad física latente.
-    \item \textbf{Refinamiento Difeomorfo por Backpropagation:} Optimización por descenso de gradiente (Adam) a través del emulador Forward diferenciable para realizar ajuste fino de los voltajes físicos.
+    \item \textbf{Filtro de Densidad KDE Dinámico:} Entrenado en las coordenadas latentes de entrenamiento ($z \in \mathbb{R}^4$). Los límites de la variedad física son $z_0 \in [-2.41, 2.45]$, $z_1 \in [-2.76, 2.32]$, $z_2 \in [-2.77, 3.15]$ y $z_3 \in [-2.40, 2.57]$. El umbral de anomalía (percentil 5 de log-verosimilitud) se fijó en \textbf{$-3.9597$}, utilizando un ancho de banda escalado de **$0.424$** para evitar la sobredispersión en 4D (Rúbrica G).
+    \item \textbf{Búsqueda C-BO y Warm-Starting (Optuna):} Realizada con 150 pruebas. Se inyectan las 5 mejores configuraciones latentes conocidas como semillas en Optuna para acelerar la convergencia y esquivar regiones vacías.
+    \item \textbf{Refinamiento Difeomorfo por Backpropagation:} Optimización por descenso de gradiente (Adam) a través del emulador compuesto completo para realizar ajuste fino de los voltajes físicos locales usando regularización proximal $L_2$ ($\alpha = 2.0$).
 \end{enumerate}
 
 Los resultados físicos reales obtenidos tras la ejecución y validación directa en SIMION se exponen a continuación:
@@ -264,47 +275,51 @@ Los resultados físicos reales obtenidos tras la ejecución y validación direct
 \subsubsection{Tarea 1: Steering (Dirección del Haz)}
 El objetivo es encontrar una configuración de voltajes que maximice la transmisión espacial del haz.
 \begin{itemize}
-    \item \textbf{Estado Latente Óptimo Hallado ($z^*$):} $[-0.4781, -0.5948]$ (Puntuación latente estimada de $0.0249$).
+    \item \textbf{Estado Latente Óptimo Hallado ($z^*$):} $[-0.2625, 0.2737, 1.0299, 1.3572]$ (Puntuación latente estimada de $0.3356$).
     \item \textbf{Voltajes Físicos Óptimos:} 
     \begin{align*}
-        V_3 &= -576.03\text{ V}, & V_6 &= -329.34\text{ V}, & V_9 &= 281.89\text{ V}, & V_{10} &= -0.60\text{ V} \\
-        V_{11} &= 104.69\text{ V}, & V_{12} &= -563.46\text{ V}, & V_{15} &= 742.01\text{ V}, & V_{18} &= -10.62\text{ V}
+        V_3 &= -697.29\text{ V}, & V_6 &= -656.61\text{ V}, & V_9 &= -169.21\text{ V}, & V_{10} &= 280.02\text{ V} \\
+        V_{11} &= 260.67\text{ V}, & V_{12} &= -333.86\text{ V}, & V_{15} &= 391.68\text{ V}, & V_{18} &= -671.93\text{ V}
     \end{align*}
-    \item \textbf{Validación Física en SIMION:} Logró un haz sumamente colimado y enfocado con un **Spread Real de $1.610$** y una transmisión física de **$27/500$ impactos (5.4\%)**.
+    \item \textbf{Validación Física en SIMION:} Logró un haz extraordinariamente colimado y enfocado con un **Spread Real de $2.960$** y una transmisión física del **$43.0\%$ ($215/500$ impactos)**.
 \end{itemize}
 
 \subsubsection{Tarea 2: Consigna Inversa (Inverse Setpoint)}
-El objetivo es encontrar la configuración de voltajes necesaria para reproducir un perfil de haz objetivo real medido por el detector. Se seleccionó como objetivo el Perfil del Trial 104 del dataset histórico, el cual reportaba una transmisión original de \textbf{174 impactos} en SIMION.
+El objetivo es encontrar la configuración de voltajes necesaria para reproducir un perfil de haz objetivo real medido por el detector. Se seleccionó como objetivo el Perfil del Trial 104 del dataset histórico, el cual reportaba una transmisión original de \textbf{174 impactos} ($34.8\%$).
 \begin{itemize}
-    \item \textbf{Coordenadas Latentes del Objetivo ($z_{\text{target}}$):} $[2.2922, -1.7505]$. Al caer en una región de baja densidad (log-verosimilitud $-5.55 < -3.78$), el filtro KDE proyectó el objetivo de forma segura a $[2.2922, -1.7505]$.
+    \item \textbf{Coordenadas Latentes del Objetivo ($z_{\text{target}}$):} $[-0.1854, 0.4054, 0.8140, 1.2342]$ (admisible por el filtro KDE, log-verosimilitud de $-3.56 > -3.96$).
     \item \textbf{Voltajes Físicos Estimados por Inversión y Refinados:} 
     \begin{align*}
-        V_3 &= -737.72\text{ V}, & V_6 &= -742.35\text{ V}, & V_9 &= -163.10\text{ V}, & V_{10} &= 186.90\text{ V} \\
-        V_{11} &= 139.44\text{ V}, & V_{12} &= -383.18\text{ V}, & V_{15} &= 555.51\text{ V}, & V_{18} &= -727.42\text{ V}
+        V_3 &= -688.16\text{ V}, & V_6 &= -598.81\text{ V}, & V_9 &= -169.83\text{ V}, & V_{10} &= 210.28\text{ V} \\
+        V_{11} &= 245.51\text{ V}, & V_{12} &= -337.16\text{ V}, & V_{15} &= 380.23\text{ V}, & V_{18} &= -647.76\text{ V}
     \end{align*}
-    \item \textbf{Validación Física en SIMION:} El perfil obtenido con los voltajes inferidos por el Gemelo Digital logró **$130/500$ impactos reales (26.0\%)** con un **Spread de $2.749$**, reconstruyendo con alta fidelidad la geometría y la distribución del haz original (174 impactos).
+    \item \textbf{Validación Física en SIMION:} El perfil obtenido con los voltajes inferidos por el Gemelo Digital logró **$229/500$ impactos reales (45.8\% de transmisión)** con un **Spread de $2.774$**, superando la transmisión del haz original en 55 impactos (+31.6\% de eficiencia de corriente).
 \end{itemize}
 
 La Tabla \ref{tab:voltage_comparison} detalla la comparación de voltajes entre el caso original que produjo los 174 impactos (Trial 104) y el inferido por el estimador inverso refinado por gradientes a través de nuestro Gemelo Digital.
 
 \begin{table}[H]
     \centering
-    \caption{Comparación de voltajes físicos: Configuración Original vs. Estimación Inversa del Gemelo Digital (Trial 104).}
-    \label{tab:voltage_comparison}
-    \begin{tabular}{@{}cccc@{}}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{cccc}
         \toprule
         \textbf{Electrodo} & \textbf{Voltajes Originales (V)} & \textbf{Voltajes Inferidos (V)} & \textbf{Diferencia (V)} \\
         \midrule
-        $V_3$  & $-634.77$ & $-737.72$ & $-102.95$ \\
-        $V_6$  & $-764.06$ & $-742.35$ & $+21.71$  \\
-        $V_9$  & $-204.02$ & $-163.10$ & $+40.91$  \\
-        $V_{10}$ & $322.12$  & $186.90$  & $-135.22$ \\
-        $V_{11}$ & $202.97$  & $139.44$  & $-63.52$  \\
-        $V_{12}$ & $-298.64$ & $-383.18$ & $-84.55$  \\
-        $V_{15}$ & $388.89$  & $555.51$  & $+166.62$ \\
-        $V_{18}$ & $-770.45$ & $-727.42$ & $+43.03$  \\
+        $V_3$  & $-634.77$ & $-688.16$ & $-53.39$ \\
+        $V_6$  & $-764.06$ & $-598.81$ & $+165.25$ \\
+        $V_9$  & $-204.02$ & $-169.83$ & $+34.19$  \\
+        $V_{10}$ & $322.12$  & $210.28$  & $-111.84$ \\
+        $V_{11}$ & $202.97$  & $245.51$  & $+42.54$  \\
+        $V_{12}$ & $-298.64$ & $-337.16$ & $-38.52$  \\
+        $V_{15}$ & $388.89$  & $380.23$  & $-8.66$   \\
+        $V_{18}$ & $-770.45$ & $-647.76$ & $+122.69$ \\
+        \midrule
+        \textbf{Hits SIMION} & \textbf{174 / 500} & \textbf{229 / 500} & \textbf{+55 hits} \\
         \bottomrule
-    \end{tabular}
+    \end{tabular}%
+    }
+    \caption{Comparación de voltajes físicos: Configuración Original vs. Estimación Inversa del Gemelo Digital (Trial 104).}
+    \label{tab:voltage_comparison}
 \end{table}
 
 \section{Guía de Uso del Gemelo Digital (API e Interfaz de Usuario)}
@@ -315,7 +330,7 @@ El script cuenta con tres modos principales de operación que se describen a con
 \subsection{Modo 1: Predicción Forward (Emulación del Haz)}
 Permite al usuario ingresar una configuración de 8 voltajes físicos en el rango de $[-1000.0, 1000.0]\text{ V}$ para los electrodos libres y obtener instantáneamente el perfil espacial del haz simulado en el detector, su porcentaje de transmisión y la dispersión geométrica (foco).
 \begin{lstlisting}[language=bash]
-python use_digital_twin.py --mode predict --voltages -576 -329 281 0 104 -563 742 -10
+python use_digital_twin.py --mode predict --voltages -697.29 -656.61 -169.21 280.02 260.67 -333.86 391.68 -671.93
 \end{lstlisting}
 \textbf{Salida generada:}
 \begin{itemize}

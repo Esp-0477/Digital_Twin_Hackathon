@@ -10,6 +10,7 @@
 \usepackage{hyperref}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{float}
 \usepackage{lmodern}
 
 \geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
@@ -62,14 +63,18 @@ Para resolver estas tareas de forma admisible (física) y eficiente, diseñamos 
 \section{Filtro de Admisibilidad por Densidad Latente}
 \label{sec:kde}
 \subsection{El Problema de los Estados No Físicos (Alucinaciones)}
-Los modelos generativos como el VAE definen una correspondencia continua en todo el espacio latente. Sin embargo, no todos los puntos $z \in \mathbb{R}^2$ representan distribuciones físicamente posibles en el detector real. Si el optimizador de control explora zonas latentes alejadas de los datos de entrenamiento, el decodificador generará histogramas ``alucinados'' y físicamente incoherentes (por ejemplo, perfiles con iones en regiones imposibles o distribuciones que violan la conservación de masa). Esto reduce el factor de admisibilidad $G$ (Rúbrica G) en la evaluación.
+Los modelos generativos como el VAE definen una correspondencia continua en todo el espacio latente. Sin embargo, no todos los puntos $z \in \mathbb{R}^4$ representan distribuciones físicamente posibles en el detector real. Si el optimizador de control explora zonas latentes alejadas de los datos de entrenamiento, el decodificador generará histogramas ``alucinados'' y físicamente incoherentes. Esto reduce el factor de admisibilidad $G$ (Rúbrica G) en la evaluación.
 
-\subsection{Solución: Estimación de Densidad por Kernel (KDE)}
-Para confinar la búsqueda al colector (manifold) de datos físicos, implementamos un estimador de densidad por kernel (\texttt{KernelDensity} en scikit-learn) con un kernel gaussiano y un ancho de banda de $h = 0.3$. 
-
-El KDE se ajusta sobre las coordenadas latentes verdaderas del conjunto de entrenamiento:
+\subsection{Solución: Estimación de Densidad por Kernel (KDE) Dinámico}
+Para confinar la búsqueda al colector (manifold) de datos físicos, implementamos un estimador de densidad por kernel (\texttt{KernelDensity} en scikit-learn) con un kernel gaussiano. Para evitar que la dispersión en alta dimensión ($z \in \mathbb{R}^4$) invalidara las muestras debido a la maldición de la dimensionalidad, definimos un ancho de banda escalado de forma dinámica:
 \begin{equation}
-    \hat{p}(z) = \frac{1}{N \cdot h^2} \sum_{i=1}^{N} K\left( \frac{z - z_i}{h} \right)
+    h = 0.3 \times \sqrt{\frac{\text{latent\_dim}}{2.0}}
+\end{equation}
+Para nuestro espacio latente 4D, esto equivale a $h = 0.424$.
+
+El KDE se ajusta sobre las coordenadas latentes verdaderas de las muestras exitosas:
+\begin{equation}
+    \hat{p}(z) = \frac{1}{N \cdot h^4} \sum_{i=1}^{N} K\left( \frac{z - z_i}{h} \right)
 \end{equation}
 donde $\{z_i\}_{i=1}^N$ son los vectores latentes obtenidos al codificar los histogramas del dataset con el Encoder del VAE.
 
@@ -77,15 +82,15 @@ Definimos un umbral de anomalía $\gamma$ basado en el percentil 5 de la log-ver
 \begin{equation}
     \text{Admisible}(z) = \log \hat{p}(z) \geq \gamma
 \end{equation}
-Cualquier punto latente $z$ con una log-densidad menor que $\gamma$ se clasifica como una anomalía no física. Durante la búsqueda latente (C-BO), este filtro actúa como un podador de candidatos (Classifier-Pruning), penalizando de inmediato los puntos fuera del manifold de entrenamiento para evitar el desperdicio de evaluaciones del emulador en zonas OOD.
+Cualquier punto latente $z$ con una log-densidad menor que $\gamma$ se clasifica como anomalía. Durante la búsqueda latente (Optuna), este filtro actúa como un podador de candidatos, penalizando de inmediato los puntos fuera del manifold.
 
 \section{Estimador Inverso (Inverse Estimator)}
-El Estimador Inverso es una red profunda $g_\phi: z \mapsto \hat{y}$ que resuelve el mapeo inverso rápido desde coordenadas latentes $z \in \mathbb{R}^2$ hacia voltajes normalizados $\hat{y} \in [-1, 1]^8$.
+El Estimador Inverso es una red profunda $g_\phi: z \mapsto \hat{y}$ que resuelve el mapeo inverso rápido desde coordenadas latentes $z \in \mathbb{R}^4$ hacia voltajes normalizados $\hat{y} \in [-1, 1]^8$.
 
 \subsection{Arquitectura Neuronal y Restricción de Rangos Físicos}
 El Estimador Inverso está implementado en PyTorch como un MLP secuencial con la siguiente estructura:
 \begin{equation}
-    2 \xrightarrow{\text{Linear+BN+ReLU}} 64 \xrightarrow{\text{Linear+BN+ReLU}} 128 \xrightarrow{\text{Linear+BN+ReLU}} 64 \xrightarrow{\text{Linear+Tanh}} 8
+    4 \xrightarrow{\text{Linear+BN+ReLU}} 64 \xrightarrow{\text{Linear+BN+ReLU}} 128 \xrightarrow{\text{Linear+BN+ReLU}} 64 \xrightarrow{\text{Linear+Tanh}} 8
 \end{equation}
 Para garantizar estrictamente que las predicciones del modelo respeten los límites físicos de los electrodos ($\pm 1000\text{ V}$), la última capa del estimador utiliza una función de activación \textbf{Tanh}:
 \begin{equation}
@@ -127,62 +132,64 @@ La clase \texttt{LatentControlSystem} implementa los pipelines de control comple
 
 \subsection{Algoritmo para Tarea de Dirección (Steering)}
 \begin{enumerate}
-    \item \textbf{C-BO (Búsqueda Latente con KDE)}: Ejecuta optimización bayesiana en el espacio latente $z \in \mathbb{R}^2$ usando Optuna. Para cada $z$ propuesto, comprueba la admisibilidad con el filtro KDE. Si no es físico, la muestra se prunea inmediatamente asignándole una penalización.
+    \item \textbf{C-BO y Warm-Starting (Optuna)}: Ejecuta optimización bayesiana en el espacio latente $z \in \mathbb{R}^4$ usando Optuna. Para esquivar mínimos locales y el vacío en 4D, sembramos el estudio inyectando los vectores latentes de los 5 mejores trials del dataset histórico (\texttt{enqueue\_trial}). Para cada sugerencia posterior, comprobamos su viabilidad física con el filtro KDE.
     \item \textbf{Mapeo Inicial}: Toma el mejor punto latente admisible $z^*$ y lo mapea a voltajes normalizados iniciales $y_{\text{inicial}}$ usando el Estimador Inverso.
-    \item \textbf{Refinamiento Proximal}: Realiza refinamiento diferenciable local sobre los voltajes por 80 pasos con $\alpha = 2.0$, minimizando el costo del emulador ($-\sum \hat{X}_i$).
+    \item \textbf{Refinamiento Proximal}: Realiza refinamiento diferenciable local sobre los voltajes por 80 pasos con $\alpha = 2.0$, minimizando el costo de transmisión compuesto del emulador ($-\sum \hat{X}_i$, que calcula la transmisión como $T_{\text{pred}} \times \sum S_j$).
     \item \textbf{Simulación Real}: Denormaliza y ejecuta SIMION para validar el enfoque verdadero.
 \end{enumerate}
 
 \subsection{Algoritmo para Tarea de Consigna Inversa (Inverse Setpoint)}
 \begin{enumerate}
-    \item \textbf{Codificación Objetivo}: Pasa el histograma bidimensional objetivo $X_{\text{target}}$ por el Encoder del VAE para obtener $z_{\text{target}}$.
+    \item \textbf{Codificación Objetivo}: Pasa el histograma objetivo $X_{\text{target}}$ por el Encoder del VAE para obtener $z_{\text{target}} \in \mathbb{R}^4$.
     \item \textbf{Proyección de Densidad}: Verifica $z_{\text{target}}$ con el filtro KDE. Si cae en una zona de baja densidad, lo proyecta al punto latente de entrenamiento más cercano.
     \item \textbf{Inferencia Inversa}: Mapea $z_{\text{target}}$ a voltajes iniciales usando el Estimador Inverso.
-    \item \textbf{Ajuste Fino por Perfil}: Refina los voltajes mediante retropropagación sobre el emulador para minimizar el MSE entre el histograma predicho $\hat{X}(y)$ y el objetivo $X_{\text{target}}$, aplicando la regularización proximal L2.
+    \item \textbf{Ajuste Fino por Perfil}: Refina los voltajes mediante retropropagación sobre el emulador para minimizar el MSE entre el histograma compuesto predicho $\hat{X}(y)$ y el objetivo $X_{\text{target}}$, aplicando la regularización proximal L2.
     \item \textbf{Validación SIMION}: Evalúa los voltajes en SIMION real y compara la coincidencia espacial del perfil obtenido.
 \end{enumerate}
 
 \section{Resultados de Validación en SIMION Real}
-Las pruebas de control se validaron directamente sobre el simulador SIMION local con los siguientes resultados:
+Las pruebas de control se validaron de forma cruzada con lazo cerrado directamente sobre SIMION local con los siguientes resultados históricos:
 
 \subsection{Resultados de la Tarea de Dirección (Steering)}
 \begin{itemize}
-    \item \textbf{Coordenada latente óptima propuesta}: $z^* = [-1.067, -1.841]$
+    \item \textbf{Coordenada latente óptima propuesta}: $z^* = [-0.262, 0.273, 1.029, 1.357]$
     \item \textbf{Voltajes sugeridos y refinados (físicos)}: \\
-    \texttt{V3=-692.40 V, V6=-697.08 V, V9=-93.16 V, V10=124.39 V, V11=120.06 V, V12=-428.13 V, V15=509.84 V, V18=-626.34 V}
-    \item \textbf{Transmisión real medida en SIMION}: \textbf{113 / 500 iones (22.6\% de transmisión)}.
+    \texttt{V3=-697.29 V, V6=-656.61 V, V9=-169.21 V, V10=280.02 V, V11=260.67 V, V12=-333.86 V, V15=391.68 V, V18=-671.93 V}
+    \item \textbf{Transmisión real medida en SIMION}: \textbf{215 / 500 iones (43.0\% de transmisión)} con spread de \textbf{2.960}.
 \end{itemize}
-El modelo superó la transmisión de la inmensa mayoría de las muestras de exploración del dataset, comprobando la robustez de la sintonización por gradientes proximales.
+Esto representa una mejora espectacular sobre el 22.6\% obtenido en la versión 2D, mostrando el poder de focalización desacoplada que ofrece el espacio latente de mayor dimensión.
 
 \subsection{Resultados de la Tarea de Consigna Inversa (Inverse Setpoint)}
-Fijamos como perfil objetivo el del \textbf{Trial 104} de entrenamiento, el cual registró originalmente \textbf{174 aciertos} bajo los voltajes definidos por el instructor.
+Fijamos como perfil objetivo el del \textbf{Trial 104} de entrenamiento, el cual registró originalmente \textbf{174 aciertos} ($34.8\%$).
 \begin{itemize}
-    \item \textbf{Coordenada latente del objetivo}: $z_{\text{target}} = [-2.448, -1.642]$
+    \item \textbf{Coordenada latente del objetivo}: $z_{\text{target}} = [-0.185, 0.405, 0.814, 1.234]$
     \item \textbf{Voltajes reconstruidos tras refinamiento proximal}: \\
-    \texttt{V3=-767.86 V, V6=-741.21 V, V9=4.77 V, V10=262.94 V, V11=108.35 V, V12=-394.00 V, V15=518.30 V, V18=-688.76 V}
-    \item \textbf{Transmisión real medida en SIMION}: \textbf{189 / 500 iones (37.8\% de transmisión)}.
+    \texttt{V3=-688.16 V, V6=-598.81 V, V9=-169.83 V, V10=210.28 V, V11=245.51 V, V12=-337.16 V, V15=380.23 V, V18=-647.76 V}
+    \item \textbf{Transmisión real medida en SIMION}: \textbf{229 / 500 iones (45.8\% de transmisión)} con spread de \textbf{2.774}.
 \end{itemize}
-El Gemelo Digital no solo logró reconstruir de manera precisa el perfil espacial del haz objetivo, sino que el optimizador proximal encontró un camino de voltajes alternativo y más eficiente, \textbf{mejorando la transmisión real en 15 impactos adicionales} frente al óptimo original del Trial 104 del dataset.
+El Gemelo Digital no solo reconstruyó espacialmente el haz de manera precisa, sino que el refinamiento proximal local localizó voltajes alternativos más eficientes, \textbf{mejorando la transmisión original en 55 impactos adicionales (+31.6\% de ganancia de corriente)} sobre el trial real.
 
-\begin{table}[h]
+\begin{table}[H]
     \centering
-    \caption{Comparación de voltajes: Trial 104 (Original) vs. Consigna Inversa Reconstruida.}
+    \resizebox{\textwidth}{!}{%
     \begin{tabular}{lccc}
         \toprule
         \textbf{Electrodo} & \textbf{Voltaje Original (V)} & \textbf{Voltaje Reconstruido (V)} & \textbf{Diferencia (V)} \\
         \midrule
-        $V_3$ (Einzel 1)   & $-737.58$ & $-767.86$ & $-30.28$ \\
-        $V_6$ (Einzel 2)   & $-695.53$ & $-741.21$ & $-45.68$ \\
-        $V_9$ (Curvador 1)  & $+1.61$   & $+4.77$   & $+3.16$  \\
-        $V_{10}$ (Curvador 2) & $+239.56$ & $+262.94$ & $+23.38$ \\
-        $V_{11}$ (Curvador 3) & $+116.14$ & $+108.35$ & $-7.79$  \\
-        $V_{12}$ (Curvador 4) & $-370.47$ & $-394.00$ & $-23.53$ \\
-        $V_{15}$ (Placa Dir 1) & $+487.32$ & $+518.30$ & $+30.98$ \\
-        $V_{18}$ (Placa Dir 2) & $-642.50$ & $-688.76$ & $-46.26$ \\
+        $V_3$ (Einzel 1)   & $-634.77$ & $-688.16$ & $-53.39$ \\
+        $V_6$ (Einzel 2)   & $-764.06$ & $-598.81$ & $+165.25$ \\
+        $V_9$ (Curvador 1)  & $-204.02$   & $-169.83$   & $+34.19$  \\
+        $V_{10}$ (Curvador 2) & $+322.12$ & $+210.28$ & $-111.84$ \\
+        $V_{11}$ (Curvador 3) & $+202.97$ & $+245.51$ & $+42.54$  \\
+        $V_{12}$ (Curvador 4) & $-298.64$ & $-337.16$ & $-38.52$ \\
+        $V_{15}$ (Placa Dir 1) & $+388.89$ & $+380.23$ & $-8.66$ \\
+        $V_{18}$ (Placa Dir 2) & $-770.45$ & $-647.76$ & $+122.69$ \\
         \midrule
-        \textbf{Hits SIMION} & \textbf{174 / 500} & \textbf{189 / 500} & \textbf{+15 hits} \\
+        \textbf{Hits SIMION} & \textbf{174 / 500} & \textbf{229 / 500} & \textbf{+55 hits} \\
         \bottomrule
-    \end{tabular}
+    \end{tabular}%
+    }
+    \caption{Comparación de voltajes: Trial 104 (Original) vs. Consigna Inversa Reconstruida.}
     \label{tab:comp_voltages}
 \end{table}
 
@@ -194,11 +201,11 @@ La implementación en código se estructura en la carpeta \texttt{src/phase\_3\_
 \end{itemize}
 
 \section{Conclusiones de la Implementación}
-La combinación del espacio latente probabilístico de baja dimensión ($z \in \mathbb{R}^2$), el filtrado por densidad KDE y la optimización local diferenciable con regularización proximal L2 resuelve con éxito las limitaciones típicas de los gemelos digitales puramente predictivos. El acoplamiento estrecho de estos elementos garantiza el cumplimiento estricto de las rúbricas de la hackathon:
+La combinación del espacio latente probabilístico de alta dimensión ($z \in \mathbb{R}^4$), el filtrado por densidad KDE dinámico y la optimización local diferenciable con regularización proximal L2 resuelve con éxito las limitaciones típicas de los gemelos digitales puramente predictivos. El acoplamiento estrecho de estos elementos garantiza el cumplimiento estricto de las rúbricas de la hackathon:
 \begin{itemize}
     \item \textbf{Rúbrica D (Diferenciabilidad)}: La optimización utiliza retropropagación analítica nativa en PyTorch.
     \item \textbf{Rúbrica G (Admisibilidad)}: La activación \texttt{Tanh} y el KDE restringen las predicciones a límites e histogramas estrictamente físicos.
-    \item \textbf{Rúbricas C (Dirección) e I (Consigna Inversa)}: Logrado mediante sintonía y superación de marcas del dataset real en SIMION (consiguiendo 113 y 189 aciertos respectivamente).
+    \item \textbf{Rúbricas C (Dirección) e I (Consigna Inversa)}: Logrado mediante sintonía y superación de marcas del dataset real en SIMION (consiguiendo 215 y 229 aciertos respectivamente).
 \end{itemize}
 
 \end{document}

@@ -69,3 +69,7 @@ target_profile.png
 *.njsproj
 *.sln
 *.swp
+
+# Pdf tex 
+
+informe_hackathon.tex

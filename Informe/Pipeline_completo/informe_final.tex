@@ -12,6 +12,7 @@
 \usepackage{booktabs}
 \usepackage{float}
 \usepackage{tikz}
+\usepackage{lmodern}
 \usetikzlibrary{shapes.geometric, arrows.meta, positioning}
 \emergencystretch 3em
 
@@ -52,9 +53,6 @@
 \begin{abstract}
 Este informe presenta el diseño, implementación y resultados del Gemelo Digital para un beamline de iones de silicio simulado en SIMION. La arquitectura de emulación se divide en tres fases integradas: compresión de estados mediante un Autoencoder Variacional ($\beta$-VAE), emulación predictiva a través de un regresor Forward DNN, y control mediante un estimador de consigna inversa DNN. Para robustecer el modelado ante la escasez de señal del haz, se diseñó un pipeline de recolección de datos que acopla Latin Hypercube Sampling (LHS) y densificación de variedad por micro-perturbaciones Gaussianas. El entrenamiento final sobre 486 muestras reales demuestra la viabilidad física del gemelo digital y su capacidad para optimizar y controlar el direccionamiento y enfoque del haz en milisegundos.
 \end{abstract}
-
-\tableofcontents
-\newpage
 
 \section{Arquitectura Propuesta del Emulador}
 La arquitectura propuesta del Gemelo Digital adapta la filosofía de los marcos \textit{VALeR} y \textit{CBOL-Tuner} para resolver tareas de forward modeling, inversión, y optimización rápida de parámetros. El flujo global se compone de tres redes neuronales que se entrenan secuencialmente:

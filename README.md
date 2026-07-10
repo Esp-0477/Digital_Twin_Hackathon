@@ -24,7 +24,7 @@ Digital Twin/
 ├── use_digital_twin.py                # Script CLI/API interactivo para predicción, inversión y optimización.
 ├── digital_twin_flow.html             # Dashboard web interactivo para demostración visual de las 3 fases.
 ├── informe_hackathon.tex              # Archivo fuente de LaTeX del reporte ejecutivo.
-├── informe_hackathon.pdf              # Reporte técnico ejecutivo compilado final (4 páginas).
+├── informe_hackathon.pdf              # Reporte técnico ejecutivo compilado final (17 páginas).
 │
 ├── Hackathon_student/
 │   └── beamline_dataset.npz           # Conjunto de datos consolidado (486 muestras reales LHS + Perturbaciones).

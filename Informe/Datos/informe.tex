@@ -1,0 +1,154 @@
+\documentclass[12pt,letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+% Configuración para bloques de código
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{\textbf{Desarrollo del Gemelo Digital del Beamline: Metodología de Recolección de Datos}}
+\author{Proyecto MIT - UNAL, Medellín \\ Hackathon Digital Twin}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introducción y Presupuesto de Datos}
+En el marco del desarrollo del Gemelo Digital de un beamline de iones, la etapa de recolección de datos constituye el cimiento sobre el cual se construyen los modelos de aprendizaje de la Fase 1 (VAE) y la Fase 2 (DNN). 
+
+Un factor de diseño crítico en este proyecto es la **eficiencia de datos (Rúbrica F)** y el cumplimiento del presupuesto asignado para entrenamiento. La recolección de datos está estrictamente limitada a un presupuesto máximo de:
+\begin{equation}
+    N_{\text{trials}} = 50 \text{ simulaciones en SIMION}
+\end{equation}
+Dado que el comportamiento del haz de iones es altamente sensible a las variaciones en las perillas de control (voltajes), la búsqueda ciega (aleatoria) en un espacio de 8 dimensiones físicas resultaría en un dataset compuesto casi en su totalidad por transmisiones nulas ($0$ hits), imposibilitando que el VAE capture la variedad geométrica del perfil del haz. 
+
+Este informe detalla la metodología utilizada para realizar una recolección inteligente de datos que cumpla con el presupuesto establecido y asegure la obtención de perfiles de haz diversos y con transmisiones no nulas.
+
+\section{El Punto de Partida y Estrategia de Arranque en Caliente}
+Para resolver el problema del inicio en frío (cold-start) en el optimizador Optuna, se implementó una estrategia de arranque en caliente (warm-start) mediante la inicialización de la búsqueda a través de un punto de partida conocido.
+
+\subsection{Definición del Punto de Partida (Starting Point)}
+Se identificó una configuración de voltajes prometedora basada en ensayos previos, en la cual se registraron impactos en la placa detectora. Se definió esta combinación en la variable \texttt{STARTING\_POINT} dentro de \texttt{optimizer.py}:
+\begin{align*}
+    V_3 &= -671.395444 \text{ V} \\
+    V_6 &= -172.968782 \text{ V} \\
+    V_9 &= 874.446955 \text{ V} \\
+    V_{10} &= -409.748014 \text{ V} \\
+    V_{11} &= 124.712466 \text{ V} \\
+    V_{12} &= -843.497875 \text{ V} \\
+    V_{15} &= 566.745248 \text{ V} \\
+    V_{18} &= 663.314502 \text{ V}
+\end{align*}
+
+\subsection{Búsqueda Dirigida}
+Al limpiar el historial y encolar el punto de partida en Optuna, la primera iteración de la simulación (Trial 0) evalúa esta configuración. Al obtener de forma inmediata un conteo de transmisión positivo, el modelo bayesiano del optimizador (TPE) utiliza este punto como ancla de probabilidad, enfocando las siguientes iteraciones del presupuesto de 50 ensayos en la vecindad de esta región óptima. Esto permite explorar variaciones funcionales del haz en lugar de dispersar el presupuesto en configuraciones vacías de nula transmisión.
+
+\section{Recolección Sistemática mediante Latin Hypercube Sampling (LHS)}
+Como alternativa y complemento a la optimización bayesiana dirigida, se ha incorporado una estrategia de exploración del espacio de búsqueda basada en \textbf{Latin Hypercube Sampling (LHS)} para robustecer el entrenamiento del VAE (Rúbrica F: Eficiencia de datos).
+
+\subsection{Fundamento de Latin Hypercube Sampling (LHS)}
+El muestreo de hipercubo latino es una técnica de muestreo cuasi-aleatoria que particiona el espacio de parámetros en intervalos equiprobables a lo largo de cada eje (dimensión), garantizando que se tome exactamente una muestra de cada fila y columna del hipercubo multidimensional. En nuestro caso de 8 dimensiones (los 8 voltajes libres), LHS asegura:
+\begin{itemize}
+    \item \textbf{Cobertura ortogonal completa:} Evita la aglomeración de muestras en zonas redundantes, logrando una representación uniforme de todo el hipercubo $[-1000, 1000]\text{ V}^8$ con una cantidad significativamente menor de evaluaciones comparado con un muestreo de grilla uniforme.
+    \item \textbf{Exploración no sesgada:} A diferencia de la optimización dirigida (que sesga los datos únicamente a las zonas óptimas), LHS proporciona muestras en zonas subóptimas y de transición, lo cual es fundamental para que el VAE aprenda las fronteras de admisibilidad física y el comportamiento de dispersión del haz.
+\end{itemize}
+
+\subsection{Implementación del Pipeline LHS}
+La generación de muestras se programó en la función \texttt{generar\_muestras\_lhs} del script \texttt{phase\_transition.py} utilizando la clase \texttt{scipy.stats.qmc.LatinHypercube}:
+\begin{lstlisting}[language=Python]
+from scipy.stats.qmc import LatinHypercube
+
+def generar_muestras_lhs(n_samples, bounds_min, bounds_max, seed=None):
+    d = len(bounds_min)
+    sampler = LatinHypercube(d=d, seed=seed)
+    samples = sampler.random(n=n_samples)
+    
+    bounds_min = np.array(bounds_min)
+    bounds_max = np.array(bounds_max)
+    scaled_samples = bounds_min + samples * (bounds_max - bounds_min)
+    return pd.DataFrame(scaled_samples, columns=cols)
+\end{lstlisting}
+
+Con esta formulación, se generó un conjunto de muestras maestro de tamaño $N_{\text{master}} = 330$, donde se destinaron las primeras $300$ muestras para el análisis experimental de cambio de fase y las últimas $30$ muestras se reservaron como un set de validación fijo.
+
+\section{Pipeline de Simulación y Filtro del Detector}
+Para cada ensayo propuesto por Optuna, se ejecutan de forma automática dos llamadas a SIMION:
+
+\begin{enumerate}
+    \item \textbf{Ajuste Rápido (fastadj):} Modifica el potencial del archivo \texttt{electrode\_.PA0} usando la combinación de voltajes elegida en el ensayo combinada con los electrodos fijos (\texttt{FIXED}).
+    \item \textbf{Vuelo de Partículas (fly):} Simula el comportamiento del haz de 500 iones de silicio y devuelve a través de la salida estándar de la consola (\texttt{stdout}) las posiciones finales de las partículas en milímetros bajo la estructura:
+    \begin{equation}
+        \text{xyz}(x, y, z)\text{mm}
+    \end{equation}
+\end{enumerate}
+
+\subsection{Filtro de Impactos en el Detector}
+Las coordenadas recolectadas se filtran para determinar si corresponden a la región física de interés. Los límites tridimensionales de la placa detectora están definidos en milímetros como:
+\begin{align*}
+    x &\in [70.0,\, 82.0] \\
+    y &\in [70.0,\, 83.0] \\
+    z &\in [403.0,\, 407.0]
+\end{align*}
+Los puntos que caen dentro de este volumen rectangular son considerados impactos exitosos en el detector.
+
+\section{Construcción de Histogramas 2D para el VAE}
+Para traducir los puntos de impacto a una representación compatible con una red neuronal de tamaño constante, se realiza una reducción geométrica a un histograma espacial.
+
+\subsection{Resolución de la Cuadrícula}
+Dado que el plano del detector se sitúa perpendicular al eje $z$, se proyectan los impactos válidos en la placa bidimensional $(x, y)$. Esta área se divide en una cuadrícula uniforme de \textbf{20 x 20 celdas} (bins). Cada bin registra el número total de iones de impacto en esa celda específica.
+
+\subsection{Normalización y Aplanado}
+Para estabilizar el entrenamiento de la red profunda, el histograma se normaliza dividiéndolo entre \textbf{500} (los iones lanzados desde la fuente). De este modo:
+\begin{itemize}
+    \item Los valores de las celdas se expresan como densidades en el rango $[0.0, 1.0]$.
+    \item La suma del histograma normalizado coincide de forma exacta con la tasa de transmisión del haz.
+\end{itemize}
+Finalmente, la cuadrícula de $20 \times 20$ se aplana a un vector unidimensional de \textbf{400 dimensiones} ($X \in \mathbb{R}^{400}$).
+
+\section{Resultados de la Recolección de Datos}
+La optimización en caliente de 50 ensayos se completó exitosamente. Los datos de perfiles espaciales se recopilaron de forma automatizada mediante el script \texttt{collect\_data.py}, re-simulando las configuraciones y compilando el dataset en el archivo comprimido \texttt{beamline\_dataset.npz} en la carpeta \texttt{Hackathon\_student}.
+
+El dataset consolidado resultante cuenta con las siguientes propiedades:
+\begin{itemize}
+    \item **Voltajes:** Matriz de dimensiones $(50, 8)$.
+    \item **Histogramas:** Matriz de dimensiones $(50, 400)$.
+    \item **Máxima Transmisión Alcanzada:** Durante el proceso, el optimizador localizó múltiples combinaciones de enfoque en la vecindad del punto semilla, alcanzando un ensayo sobresaliente con **49 impactos en el detector** (Trial 24, representando cerca del 10\% de transmisión).
+\end{itemize}
+
+El dataset así recolectado y preprocesado cuenta con suficiente riqueza y variabilidad de perfiles de haz para posibilitar el entrenamiento del emulador diferenciable de las fases siguientes.
+
+\end{document}

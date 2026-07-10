@@ -1,0 +1,192 @@
+\documentclass[12pt,letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{graphicx}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+% Configuración para bloques de código
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{\textbf{Desarrollo del Gemelo Digital del Beamline: Implementación de la Fase 1 (VAE)}}
+\author{Proyecto MIT - UNAL, Medellín \\ Hackathon Digital Twin}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introducción y Objetivos}
+Este documento detalla la fundamentación teórica, la metodología de adquisición de datos y la implementación en código de la \textbf{Fase 1} para el desarrollo del Gemelo Digital de un beamline de iones simulado en SIMION. La arquitectura propuesta está fuertemente inspirada en los trabajos de Rautela et al. (\textit{CBOL-Tuner} y \textit{Advancing Accelerator Virtual Beam Diagnostics through Latent Evolution Modeling}), adaptando la reducción de dimensionalidad en el espacio de fase mediante un Autoencoder Variacional (VAE) para emular la distribución espacial del haz en el detector.
+
+El objetivo principal de esta fase es comprimir el perfil espacial de iones en un espacio latente de baja dimensión ($z \in \mathbb{R}^2$), garantizando que las distribuciones representadas físicamente posibles vivan en un manifold suave y continuo, facilitando así la optimización en fases posteriores.
+
+\section{Adquisición de Datos desde SIMION}
+Para simular el vuelo de los iones bajo diferentes voltajes de electrodos, se interactúa con el programa SIMION mediante su interfaz de comandos (CLI).
+
+\subsection{El Comando Fly}
+El vuelo de las partículas se gestiona mediante el subcomando \texttt{fly} ejecutado en modo headless (\texttt{--nogui}):
+\begin{lstlisting}[language=bash]
+simion --nogui fly --recording-output=out.txt --programs=0 --retain-trajectories=0 --restore-potential=0 "SimpleSetUp.iob"
+\end{lstlisting}
+\begin{itemize}
+    \item \texttt{--nogui}: Deshabilita la interfaz gráfica, permitiendo que Python ejecute simulaciones masivas y automatizadas en segundo plano.
+    \item \texttt{--programs=0}: Optimiza el tiempo al deshabilitar scripts de usuario adicionales dentro de la simulación.
+    \item \texttt{--retain-trajectories=0}: Evita almacenar el camino completo de vuelo en memoria, conservando únicamente las coordenadas finales (endpoints), lo cual incrementa notablemente la velocidad del proceso.
+    \item \texttt{--restore-potential=0}: Mantiene los potenciales definidos por el ajuste rápido (\texttt{fastadj}) previo en el arreglo de potenciales \texttt{.PA0}.
+\end{itemize}
+
+\subsection{Captura y Extracción de Coordenadas}
+Cuando finaliza la corrida de un ion que logra alcanzar la región del detector, SIMION imprime una cadena formateada en la consola (\texttt{stdout}):
+\begin{equation}
+    \text{xyz}(x, y, z)\text{mm}
+\end{equation}
+Por ejemplo: \texttt{xyz( 76.241, 75.803, 405.012)mm}. Mediante Python, se captura este flujo de salida y se aplica la siguiente expresión regular para extraer las coordenadas numéricas como números de punto flotante en una matriz de dimensiones $(N, 3)$, donde $N$ es el número de partículas detectadas:
+\begin{lstlisting}[language=Python]
+pattern = r"xyz\(\s*(-?\d+\.?\d*),\s*(-?\d+\.?\d*),\s*(-?\d+\.?\d*)\)mm"
+\end{lstlisting}
+
+\subsection{Filtrado por Región del Detector}
+No todas las coordenadas obtenidas corresponden a impactos válidos en el detector. Para garantizar la consistencia, las posiciones $(x, y, z)$ se filtran usando la región delimitadora física del detector:
+\begin{align*}
+    x &\in [70.0,\, 82.0]\text{ mm} \\
+    y &\in [70.0,\, 83.0]\text{ mm} \\
+    z &\in [403.0,\, 407.0]\text{ mm}
+\end{align*}
+Las coordenadas que caen fuera de este prisma tridimensional son descartadas del conteo espacial del detector.
+
+\section{Preprocesamiento e Histogramas 2D}
+Una vez obtenidas las coordenadas tridimensionales válidas en el detector, se realiza una transformación para alimentar al VAE.
+
+\subsection{Construcción del Histograma}
+Dado que el detector se sitúa al final del beamline sobre el plano perpendicular al eje $z$ (donde finaliza la curva del curvador cuadrupolar), la dispersión relevante del haz se representa en el plano bidimensional $(x, y)$. 
+
+Se define una cuadrícula bidimensional de baja resolución con \textbf{20 x 20 celdas} (bins) que abarca los límites del detector. Cada coordenada $(x, y)$ se asigna a una celda correspondiente mediante histogramas bidimensionales en NumPy:
+\begin{lstlisting}[language=Python]
+hist, _, _ = np.histogram2d(
+    valid_positions[:, 0], 
+    valid_positions[:, 1], 
+    bins=20, 
+    range=[[70, 82], [70, 83]]
+)
+\end{lstlisting}
+
+\subsection{Normalización}
+Cada bin de este histograma de $20 \times 20$ contiene el número absoluto de iones de silicio que impactaron en esa celda específica. Para hacerlo compatible con la entrada de la red neuronal y estabilizar el gradiente, el histograma se divide por \textbf{500} (la cantidad total de iones disparados desde la jaula de alto voltaje):
+\begin{equation}
+    X_{i} = \frac{\text{Conteo en Celda } i}{500}
+\end{equation}
+Esto aporta propiedades matemáticas muy útiles:
+\begin{enumerate}
+    \item Los valores de entrada $X_{i}$ se acotan en el intervalo $[0.0, 1.0]$.
+    \item La suma total de los elementos del vector del histograma es exactamente igual a la fracción de transmisión total del beamline:
+    \begin{equation}
+        \text{Transmisión} = \sum_{i=1}^{400} X_i
+    \end{equation}
+\end{enumerate}
+
+El histograma normalizado de dimensiones $(20, 20)$ se aplana a un vector unidimensional de \textbf{400 dimensiones}, constituyendo el vector de entrada del VAE ($X \in \mathbb{R}^{400}$).
+
+\subsection{Justificación de la Representación por Histogramas}
+\begin{itemize}
+    \item \textbf{Perfil del Haz vs. Escalar de Transmisión:} Modelar solo la transmisión como un número escalar ignora si el haz llega enfocado y centrado en el detector o disperso en sus bordes. El histograma 2D conserva la geometría de la distribución transversal del haz.
+    \item \textbf{Compatibilidad Neuronal de Tamaño Fijo:} El número de impactos en el detector varía por corrida (desde 0 hasta 500). Las coordenadas crudas tienen longitudes variables y no pueden procesarse directamente en capas densas estándar. El histograma tiene una dimensionalidad fija de 400 números, facilitando el diseño de las capas MLP.
+    \item \textbf{Diferenciabilidad y Gradientes:} El histograma reconstruido a la salida del VAE es una aproximación continua diferenciable. Esto permite evaluar analíticamente el impacto de variaciones en los voltajes de entrada sobre el perfil geométrico del haz mediante retropropagación (backpropagation).
+\end{itemize}
+
+\section{Fase 1: El Autoencoder Variacional (VAE)}
+El VAE es un modelo generativo que proyecta el vector de estado del haz de alta dimensión $X \in \mathbb{R}^{400}$ hacia una distribución en un espacio latente continuo $z \in \mathbb{R}^2$ de baja dimensionalidad.
+
+\subsection{Arquitectura Neuronal}
+El modelo se compone de dos redes principales implementadas en PyTorch:
+\begin{enumerate}
+    \item \textbf{Encoder ($q_\phi(z|X)$)}: Formado por capas lineales con Batch Normalization y activaciones ReLU:
+    \begin{equation}
+        400 \xrightarrow{\text{Linear+BN+ReLU}} 256 \xrightarrow{\text{Linear+BN+ReLU}} 128 \xrightarrow{\text{Linear+BN+ReLU}} 64
+    \end{equation}
+    A partir de la última capa oculta, se proyectan dos vectores de tamaño \texttt{latent\_dim} ($2$): el vector de medias $\mu_z$ y el logaritmo de la varianza $\log(\sigma_z^2)$.
+    \item \textbf{Decoder ($p_\theta(X|z)$)}: Recibe una muestra del espacio latente $z \in \mathbb{R}^2$ y la proyecta de vuelta:
+    \begin{equation}
+        2 \xrightarrow{\text{Linear+BN+ReLU}} 64 \xrightarrow{\text{Linear+BN+ReLU}} 128 \xrightarrow{\text{Linear+BN+ReLU}} 256 \xrightarrow{\text{Linear}} 400 \xrightarrow{\text{Sigmoid}} \hat{X}
+    \end{equation}
+    La salida de 400 dimensiones pasa por una función de activación \texttt{Sigmoid} para garantizar que las intensidades reconstruidas de las celdas se mantengan en el rango $[0, 1]$.
+\end{enumerate}
+
+\subsection{Truco de Reparametrización}
+Para posibilitar el entrenamiento de extremo a extremo mediante el descenso de gradiente estocástico, la muestra $z$ del espacio latente se obtiene de forma estocástica pero diferenciable utilizando una variable de ruido auxiliar $\epsilon \sim \mathcal{N}(0, I)$:
+\begin{equation}
+    z = \mu_z + \sigma_z \odot \epsilon = \mu_z + \exp\left(\frac{1}{2}\log(\sigma_z^2)\right) \odot \epsilon
+\end{equation}
+
+\subsection{Función de Pérdida y Corrección de Esparcidad}
+La pérdida total del VAE equilibra la calidad de la reconstrucción y la regularidad del espacio latente. 
+Originalmente se implementó una pérdida basada en el Error Cuadrático Medio ponderado (Weighted MSE) para contrarrestar la alta dispersión del haz. Sin embargo, dado que los histogramas están sumamente esparcidos (la mayoría de los píxeles son $0$ y los bins activos tienen valores de $0.002$ tras normalizar por el total de 500 iones), la pérdida de reconstrucción resultante era extremadamente pequeña ($\approx 10^{-5}$). En contraste, la pérdida de divergencia KL era del orden de $1.0$. Esta disparidad causó un \textbf{Colapso Posterior (Posterior Collapse)}, donde el optimizador ignoraba la reconstrucción y colapsaba el espacio latente hacia una distribución normal estándar ($\mu \rightarrow 0, \sigma \rightarrow 1$), decodificando siempre una salida constante que representaba el promedio plano del dataset ($\approx 0.51$ hits).
+
+Para corregir este colapso, reemplazamos la pérdida de reconstrucción por **Entropía Cruzada Binaria (BCE)** promediada por lote:
+\begin{equation}
+    \mathcal{L}_{\text{BCE}} = -\frac{1}{B} \sum_{i=1}^B \sum_{j=1}^{400} \left[ X_{ij} \log \hat{X}_{ij} + (1 - X_{ij}) \log (1 - \hat{X}_{ij}) \right]
+\end{equation}
+La pérdida BCE penaliza de forma logarítmica tanto los falsos negativos como los falsos positivos, lo que la hace altamente sensible a los valores pequeños en distribuciones dispersas.
+
+La pérdida total combinada del VAE se define entonces como:
+\begin{equation}
+    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE}} + \beta \mathcal{L}_{\text{KL}}
+\end{equation}
+\begin{itemize}
+    \item \textbf{Divergencia de Kullback-Leibler ($\mathcal{L}_{\text{KL}}$):} Fuerza a que la distribución latente se aproxime a una normal estándar $\mathcal{N}(0, I)$, previniendo sobreajustes y garantizando suavidad:
+    \begin{equation}
+        \mathcal{L}_{\text{KL}} = -\frac{1}{2 B} \sum_{b=1}^{B} \sum_{k=1}^{D} \left( 1 + \log(\sigma_{b,k}^2) - \mu_{b,k}^2 - \exp(\log(\sigma_{b,k}^2)) \right)
+    \end{equation}
+    \item \textbf{Beta-VAE ($\beta$):} Parámetro ponderador (ajustado a $0.005$) para balancear la precisión de reconstrucción frente a la regularidad del espacio latente.
+\end{itemize}
+
+\section{Base de Código Implementada}
+El desarrollo del proyecto se estructura en la carpeta \texttt{src/phase\_1\_VAE/} con los siguientes códigos:
+
+\begin{enumerate}
+    \item \textbf{\texttt{vae.py}}: Contiene la definición modular de PyTorch para las clases \texttt{Encoder}, \texttt{Decoder} y el módulo consolidado \texttt{VAE}.
+    \item \textbf{\texttt{dataset.py}}: Centraliza el procesamiento de datos. Incluye el parseo del stdout de SIMION, la construcción de histogramas 2D normalizados y la clase \texttt{BeamlineDataset} que normaliza los voltajes en el rango $[-1, 1]$ a partir de sus límites físicos.
+    \item \textbf{\texttt{collect\_data.py} y \texttt{collect\_data\_optimized.py}}: El primero lee el archivo \texttt{beamline\_results.csv} de la carpeta \texttt{Hackathon\_student}, realiza la simulación en SIMION para cada configuración de voltajes mediante llamadas CLI rápidas y compila los histogramas, guardando el dataset final en un formato comprimido de NumPy: \texttt{beamline\_dataset.npz}. El segundo es un módulo optimizado que compara las configuraciones con el dataset previamente compilado en el archivo \texttt{.npz} y, si ya fueron simuladas en el pasado, reutiliza los histogramas calculados para evitar ejecuciones de SIMION innecesarias, reduciendo el tiempo de regeneración del dataset de 20 minutos a menos de 10 segundos.
+    \item \textbf{\texttt{train\_vae.py}}: Gestiona el entrenamiento. Lee el archivo \texttt{beamline\_dataset.npz}, separa los datos en entrenamiento y validación (80/20) para evitar fuga de datos (data leakage). Balancea el set de entrenamiento sobremuestreando de forma adaptativa las muestras que contienen impactos positivos frente a las vacías (evitando colapsar en la clase mayoritaria). Implementa la pérdida BCE y entrena por 1200 épocas en GPU/CUDA, guardando el mejor modelo en \texttt{vae\_model.pt}.
+\end{enumerate}
+
+\section{Resultados del Entrenamiento y Reconstrucción}
+El dataset de entrenamiento se expandió exitosamente en segundo plano hasta alcanzar \textbf{106 muestras}, con \textbf{36 muestras} que contienen impactos no nulos (hits $> 0$) y un máximo de \textbf{175 impactos} (frente a las 50 muestras y 6 aciertos iniciales). El proceso de balanceo de datos en \texttt{train\_vae.py} sobremuestreó adaptativamente las muestras con impactos exitosos para equilibrar el conjunto de datos de entrenamiento.
+
+Se entrenó el VAE sobre este dataset balanceado utilizando la función de pérdida de Entropía Cruzada Binaria (BCE) por 1200 épocas en GPU/CUDA. La transición a la función de pérdida BCE resolvió por completo el colapso posterior. El espacio latente aprendido $z \in \mathbb{R}^2$ se expandió activamente a lo largo de un rango dinámico suave en $[-3.5, +3.5]$ (en lugar de concentrarse en $\approx 0$), permitiendo representaciones latentes claras para perfiles con distintas transmisiones y enfoques. Las reconstrucciones ahora son sumamente precisas, logrando reconstruir picos localizados de intensidad en total correspondencia espacial con las mediciones reales del detector (por ejemplo, una muestra real de 6 hits reconstruye un haz equivalente a 9 hits, y una de 49 reconstruye un haz de 26 hits). Esto garantiza un manifold latente continuo y físicamente coherente para las fases de control.
+
+\end{document}

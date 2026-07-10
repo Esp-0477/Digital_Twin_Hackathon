@@ -1,0 +1,165 @@
+\documentclass[12pt,letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{graphicx}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+% Configuración para bloques de código
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{\textbf{Desarrollo del Gemelo Digital del Beamline: Implementación de la Fase 2 (Emulador Forward)}}
+\author{Proyecto MIT - UNAL, Medellín \\ Hackathon Digital Twin}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introducción}
+Este documento describe el desarrollo y la implementación en código de la \textbf{Fase 2: El Emulador Forward (DNN)} en el marco del Gemelo Digital del beamline de iones. La arquitectura sigue la filosofía del paper \textit{CBOL-Tuner} de Rautela et al., donde el modelado predictivo del sistema no se realiza mapeando directamente las acciones físicas a los estados complejos (de muy alta dimensión y ruidosos), sino reduciendo el mapeo a través del espacio latente entrenado en la Fase 1.
+
+A continuación, se justifica la fundamentación matemática, la arquitectura de la red implementada, el proceso de entrenamiento y la verificación práctica de la diferenciabilidad del emulador.
+
+\section{Fundamentación Teórica del Emulador Forward}
+En un beamline real o simulado mediante SIMION, el comportamiento del sistema está determinado por un vector de voltajes de entrada (acciones $y \in \mathbb{R}^8$) y produce una distribución de partículas en el detector (estado $X \in \mathbb{R}^{400}$).
+
+\subsection{¿Qué es el Emulador Forward?}
+El Emulador Forward es un regresor $f_\psi(y)$ estructurado como una red neuronal artificial profunda (DNN) que recibe los voltajes normalizados y predice las coordenadas en el espacio latente del VAE:
+\begin{equation}
+    f_\psi: y \mapsto \hat{z} \in \mathbb{R}^2
+\end{equation}
+
+El flujo completo de predicción para reconstruir el perfil espacial del haz en el detector es:
+\begin{equation}
+    y \xrightarrow{f_\psi} \hat{z} \xrightarrow{\text{Decoder}} \hat{X}
+\end{equation}
+
+\subsection{¿Por qué mapear al Espacio Latente en lugar de mapear directo?}
+Mapear directamente los voltajes a la distribución del detector ($y \to X$) presenta múltiples inconvenientes:
+\begin{itemize}
+    \item \textbf{Alta dimensionalidad y escasez de datos:} Mapear 8 entradas a 400 salidas independientes requiere una gran cantidad de parámetros en la red, lo que induce sobreajuste con pocos datos.
+    \item \textbf{Predicciones físicamente imposibles:} Una red que mapee directamente a $X$ no conoce las correlaciones espaciales reales y puede predecir ruido de fondo o distribuciones no físicas (hallucinations).
+    \item \textbf{Restricción física (Manifold Latente):} Al forzar a que el regresor apunte a la zona latente $z$ del VAE, las predicciones del decodificador están restringidas al subespacio (manifold) de distribuciones que el VAE aprendió como ``físicamente posibles'' durante la Fase 1.
+\end{itemize}
+
+\subsection{¿Para qué sirve esta arquitectura? (Rúbrica D)}
+El fin de este diseño es la \textbf{Diferenciabilidad Analítica de Extremo a Extremo}. Como el regresor $f_\psi$ y el Decodificador del VAE están implementados en PyTorch, el flujo compuesto completo:
+\begin{equation}
+    \text{Score} = g(\text{Decoder}(f_\psi(y)))
+\end{equation}
+se compone enteramente de operaciones diferenciables. Esto nos permite calcular analíticamente y de manera instantánea el gradiente del perfil de haz predicho con respecto a las perillas físicas de entrada:
+\begin{equation}
+    \nabla_y \text{Score} = \frac{\partial \text{Score}}{\partial y}
+\end{equation}
+usando retropropagación (\texttt{.backward()}). Gracias a este gradiente, es posible optimizar el enfoque y alineación del haz de forma determinista usando optimizadores de primer orden en milisegundos, en lugar de realizar miles de simulaciones a ciegas en SIMION.
+
+\section{Arquitectura Neuronal del Emulador}
+La red se implementa en PyTorch en el archivo \texttt{model.py} y se compone de dos elementos fundamentales:
+
+\subsection{Forward Regressor (DNN)}
+El regresor es un perceptrón multicapa (MLP) con la siguiente estructura de capas densas y activaciones lineales/ReLU:
+\begin{equation}
+    8 \xrightarrow{\text{Linear+ReLU}} 64 \xrightarrow{\text{Linear+ReLU}} 128 \xrightarrow{\text{Linear+ReLU}} 64 \xrightarrow{\text{Linear}} 2
+\end{equation}
+No se incluye Batch Normalization aquí para garantizar que la salida de la función sea puramente determinista y suave respecto al vector de voltajes de entrada $y$.
+
+\subsection{Full Emulator (Compuesto)}
+La clase \texttt{FullEmulator} amarra ambas fases en una única tubería de ejecución de PyTorch. Al instanciarse, recibe el regresor entrenado y el Decodificador del VAE. De forma automática, congela todos los parámetros del Decodificador:
+\begin{lstlisting}[language=Python]
+for param in self.decoder.parameters():
+    param.requires_grad = False
+\end{lstlisting}
+Esto garantiza que durante el ajuste del emulador forward, no se modifique el espacio latente del VAE, optimizando únicamente el mapeo del regresor.
+
+\section{Proceso de Entrenamiento y Datos}
+El entrenamiento está gestionado por el archivo \texttt{train\_dnn.py}.
+
+\subsection{Codificación Latente de los Datos de Entrenamiento}
+Dado que el dataset en formato comprimido de NumPy \texttt{beamline\_dataset.npz} contiene los voltajes $y_i$ y los histogramas reales $X_i$, primero pasamos todos los histogramas $X_i$ por el Encoder del VAE cargado para obtener la distribución latente determinista $z_i = \mu_{z,i}$. De esta forma, construimos pares de entrenamiento $(y_i, z_i)$.
+
+\subsection{Función de Pérdida y Optimización}
+La pérdida que se minimiza para entrenar el regresor es el Error Cuadrático Medio (MSE) en el espacio latente:
+\begin{equation}
+    \mathcal{L}_{\text{MSE}} = \frac{1}{B} \sum_{b=1}^{B} \|\hat{z}_b - z_b\|^2
+\end{equation}
+Se divide el dataset en Entrenamiento y Validación (80/20). Se utiliza el optimizador Adam con una tasa de aprendizaje de $10^{-3}$ y un tamaño de lote de 8.
+
+\section{Base de Código de la Fase 2}
+Los códigos correspondientes se ubican en la carpeta \texttt{src/phase\_2\_DNN/}:
+\begin{itemize}
+    \item \textbf{\texttt{model.py}}: Contiene las clases \texttt{ForwardRegressor} y \texttt{FullEmulator}.
+    \item \textbf{\texttt{train\_dnn.py}}: Carga el dataset, el VAE de la Fase 1, realiza la codificación latente, entrena el regresor y guarda los pesos en \texttt{forward\_regressor.pt}.
+    \item \textbf{\texttt{verify\_emulator.py}}: Script de diagnóstico que verifica de manera práctica la diferenciabilidad del modelo calculando gradientes de la transmisión del haz respecto a los voltajes.
+\end{itemize}
+
+\section{Resultados y Verificación}
+El regresor forward se entrenó sobre las 46 simulaciones recolectadas de SIMION.
+
+\subsection{Curva de Convergencia}
+El entrenamiento de 150 épocas en CUDA arrojó los siguientes resultados:
+\begin{itemize}
+    \item \textbf{Época 1:} MSE de entrenamiento de $0.037108$, validación de $0.008147$.
+    \item \textbf{Época 15:} MSE de entrenamiento de $0.000163$, validación de $0.000323$.
+    \item \textbf{Época 150:} Finalización exitosa con un MSE de validación óptimo de \textbf{0.000155}, guardándose en \texttt{forward\_regressor.pt}.
+\end{itemize}
+La bajísima pérdida MSE latente indica que el regresor modela con alta fidelidad las coordenadas latentes correspondientes a cada combinación física de voltajes.
+
+\subsection{Cálculo Analítico de Sensibilidad (Gradientes)}
+Se ejecutó el script de verificación cargando el emulador compuesto. Introduciendo voltajes de prueba normalizados se predijo el perfil de haz $\hat{X}$ y se definió la transmisión como la suma de bins del histograma: $\text{Transmission} = \sum \hat{X}_i$. Aplicando retropropagación, obtuvimos los gradientes analíticos reales en consola:
+\begin{table}[h]
+    \centering
+    \caption{Gradientes de sensibilidad obtenidos mediante retropropagación.}
+    \begin{tabular}{lc}
+        \toprule
+        \textbf{Voltaje del Electrodo} & \textbf{Sensibilidad Analítica ($\partial \text{Transmisión} / \partial V$)} \\
+        \midrule
+        $V_3$ (Lente Einzel 1 centro) & $-0.019970$ \\
+        $V_6$ (Lente Einzel 2 centro) & $-0.023670$ \\
+        $V_9$ (Curvador cuadrupolar 1) & $+0.070732$ \\
+        $V_{10}$ (Curvador cuadrupolar 2) & $-0.024156$ \\
+        $V_{11}$ (Curvador cuadrupolar 3) & $+0.022326$ \\
+        $V_{12}$ (Curvador cuadrupolar 4) & $-0.067548$ \\
+        $V_{15}$ (Placa dirección 1) & $+0.055127$ \\
+        $V_{18}$ (Placa dirección 2) & $+0.001081$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Estos gradientes muestran, por ejemplo, que para incrementar la transmisión, se debería aumentar ligeramente el voltaje en el electrodo 9 ($V_9$) y disminuir el de la lente Einzel 1 ($V_3$). Esto valida la completa diferenciabilidad y la utilidad de control del Gemelo Digital.
+
+\end{document}

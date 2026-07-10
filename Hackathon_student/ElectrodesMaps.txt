@@ -1,0 +1,12 @@
+Electrodes 3
+Electrodes 6
+Electrodes 9
+Electrodes 10
+Electrodes 11
+Electrodes 12
+Electrodes 15
+Electrodes 18
+
+Electrodes 1= 500 V
+Electrodes 19=-2000 V
+Electrodos 2 4 5 7 8 13 14 16 17 =0

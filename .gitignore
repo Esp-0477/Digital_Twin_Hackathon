@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Databases and data files
+*.db
+*.csv
+*.npz
+*.pt
+out.txt
+
+# SIMION Large Potential Arrays (Mandatory to ignore to avoid GBs of data)
+*.PA*
+*.PA#
+
+# Transient GUI generated profile images
+predicted_profile.png
+optimized_profile.png
+reconstructed_profile.png
+target_profile.png
+
+# Force track required small dataset and trained weights
+!Hackathon_student/beamline_dataset.npz
+!src/phase_1_VAE/vae_model.pt
+!src/phase_2_DNN/forward_regressor.pt
+!src/phase_3_control/inverse_estimator.pt
+
+# LaTeX compilation artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# IDEs
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp

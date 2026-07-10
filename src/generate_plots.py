@@ -33,13 +33,13 @@ def main():
     raw_histograms = dataset.raw_histograms # (N, 400)
     raw_voltages = dataset.raw_voltages     # (N, 8)
     
-    # Load VAE
-    vae = VAE(input_dim=400, latent_dim=2).to(device)
+    # Load VAE with latent_dim=4
+    vae = VAE(input_dim=400, latent_dim=4).to(device)
     vae.load_state_dict(torch.load(vae_weights_path, map_location=device))
     vae.eval()
     
-    # Load Forward Regressor
-    regressor = ForwardRegressor(input_dim=8, latent_dim=2).to(device)
+    # Load Forward Regressor with latent_dim=4
+    regressor = ForwardRegressor(input_dim=8, latent_dim=4).to(device)
     regressor.load_state_dict(torch.load(regressor_weights_path, map_location=device))
     regressor.eval()
     
@@ -59,6 +59,16 @@ def main():
         
         # Predicted latents (from DNN Regressor)
         pred_z = regressor(voltages_t).cpu().numpy()
+        
+    # Project to 2D using PCA for scatter plot if latent_dim > 2
+    latent_dim = true_z.shape[1]
+    if latent_dim > 2:
+        print(f"Applying PCA to project {latent_dim}D latent space to 2D for scatter plot...")
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2)
+        true_z_plot = pca.fit_transform(true_z)
+    else:
+        true_z_plot = true_z
         
     print("Models loaded and evaluations complete.")
     
@@ -84,7 +94,8 @@ def main():
     
     # Sample with hits
     real_hits_grid = raw_histograms[sample_idx_hits].reshape(20, 20) * 500 # back to counts
-    recon_hits_grid = reconstructed_histograms[sample_idx_hits].reshape(20, 20) * 500
+    # Multiply VAE reconstruction (which sums to 1.0) by the true number of hits to match scale
+    recon_hits_grid = reconstructed_histograms[sample_idx_hits].reshape(20, 20) * transmissions[sample_idx_hits]
     
     im1 = axes[0].imshow(real_hits_grid, cmap='viridis', origin='lower')
     axes[0].set_title(f"Real Histogram (Trial {sample_idx_hits}, Hits: {transmissions[sample_idx_hits]:.0f})")
@@ -108,16 +119,17 @@ def main():
     mask_hits = transmissions > 0
     mask_nohits = transmissions == 0
     
-    plt.scatter(true_z[mask_nohits, 0], true_z[mask_nohits, 1], c='lightgrey', label='0 Hits', alpha=0.8, edgecolors='grey', s=40)
+    plt.scatter(true_z_plot[mask_nohits, 0], true_z_plot[mask_nohits, 1], c='lightgrey', label='0 Hits', alpha=0.8, edgecolors='grey', s=40)
     
     if np.any(mask_hits):
-        sc = plt.scatter(true_z[mask_hits, 0], true_z[mask_hits, 1], c=transmissions[mask_hits], 
+        sc = plt.scatter(true_z_plot[mask_hits, 0], true_z_plot[mask_hits, 1], c=transmissions[mask_hits], 
                          cmap='autumn_r', label='Hits > 0', alpha=1.0, edgecolors='black', s=80)
         plt.colorbar(sc, label="Number of hits")
         
-    plt.title("2D Latent Space Projection (VAE Encoder)")
-    plt.xlabel("Latent variable z_1")
-    plt.ylabel("Latent variable z_2")
+    title = f"2D Latent Space PCA Projection (VAE Encoder, dim={latent_dim})" if latent_dim > 2 else "2D Latent Space Projection (VAE Encoder)"
+    plt.title(title)
+    plt.xlabel("PCA Component 1" if latent_dim > 2 else "Latent variable z_1")
+    plt.ylabel("PCA Component 2" if latent_dim > 2 else "Latent variable z_2")
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend()
     plt.tight_layout()

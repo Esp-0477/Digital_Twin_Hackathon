@@ -19,7 +19,7 @@ class InverseEstimator(nn.Module):
     DNN that maps latent coordinates z in R^latent_dim to normalized voltages y in R^8.
     This solves the Inverse Setpoint problem (Consigna Inversa).
     """
-    def __init__(self, latent_dim=2, hidden_dims=[64, 128, 64], output_dim=8):
+    def __init__(self, latent_dim=4, hidden_dims=[64, 128, 64], output_dim=8):
         super(InverseEstimator, self).__init__()
         
         layers = []
@@ -47,7 +47,7 @@ def train_inverse_estimator(
     epochs=200,
     batch_size=8,
     learning_rate=1e-3,
-    latent_dim=2,
+    latent_dim=4,
     save_model_name="inverse_estimator.pt"
 ):
     print("=== Training Inverse Estimator (Latent Space -> Voltages) ===")
@@ -92,7 +92,7 @@ def train_inverse_estimator(
     
     # Extract only valid samples from the BeamlineDataset
     for idx in valid_indices:
-        voltages_tensor, histogram_tensor = dataset[idx]
+        voltages_tensor, histogram_tensor, _ = dataset[idx]
         
         # Add batch dimension and send to device
         histogram_tensor = histogram_tensor.unsqueeze(0).to(device)
@@ -174,4 +174,4 @@ def train_inverse_estimator(
 if __name__ == "__main__":
     dataset_file = CURRENT_DIR.parent.parent / "Hackathon_student" / "beamline_dataset.npz"
     vae_weights = CURRENT_DIR.parent / "phase_1_VAE" / "vae_model.pt"
-    train_inverse_estimator(str(dataset_file), str(vae_weights), epochs=200, batch_size=8, latent_dim=2)
+    train_inverse_estimator(str(dataset_file), str(vae_weights), epochs=200, batch_size=8, latent_dim=4)

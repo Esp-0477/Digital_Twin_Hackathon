@@ -81,6 +81,10 @@ def build_histogram(positions: np.ndarray, bins=20) -> np.ndarray:
         range=[[x_min, x_max], [y_min, y_max]]
     )
     
+    # Apply Gaussian smoothing to make the profile less sparse and easier to reconstruct
+    from scipy.ndimage import gaussian_filter
+    hist = gaussian_filter(hist, sigma=0.8)
+    
     # Normalize by 500 (the total number of ions launched)
     normalized_hist = hist / 500.0
     
@@ -125,7 +129,8 @@ class BeamlineDataset(Dataset):
     PyTorch Dataset for the beamline emulator.
     Loads and normalizes:
       - Voltages (actions y in R^8), scaled to [-1, 1] range based on their optimization limits.
-      - 2D histograms (states X in R^400), normalized to [0, 1] (sum represents transmission).
+      - 2D histograms (states X in R^400) normalized to probability distributions (sum=1 for VAE)
+        along with the transmission scalar.
     """
     def __init__(self, data_path: str):
         # Load npz file containing 'voltages' and 'histograms'
@@ -133,26 +138,40 @@ class BeamlineDataset(Dataset):
         self.raw_voltages = data['voltages'].astype(np.float32)       # shape: (N, 8)
         self.raw_histograms = data['histograms'].astype(np.float32)   # shape: (N, 400)
         
+        # Apply Gaussian smoothing to raw histograms before any normalization
+        from scipy.ndimage import gaussian_filter
+        smoothed_raw_histograms = []
+        for h in self.raw_histograms:
+            h_2d = h.reshape(20, 20)
+            h_smooth = gaussian_filter(h_2d, sigma=0.8)
+            smoothed_raw_histograms.append(h_smooth.flatten())
+        self.raw_histograms = np.array(smoothed_raw_histograms, dtype=np.float32)
+        
         # Scale voltages to [-1, 1] using OPTIMIZE limits
         self.opt_keys = sorted(list(OPTIMIZE.keys()))  # [3, 6, 9, 10, 11, 12, 15, 18]
         self.min_vals = np.array([OPTIMIZE[k][0] for k in self.opt_keys], dtype=np.float32)
         self.max_vals = np.array([OPTIMIZE[k][1] for k in self.opt_keys], dtype=np.float32)
         
         # Min-max scale voltages to [-1, 1]
-        # norm_volts = 2 * (v - min) / (max - min) - 1
         self.voltages = 2.0 * (self.raw_voltages - self.min_vals) / (self.max_vals - self.min_vals) - 1.0
         
-        # Histograms are already normalized to [0, 1] in build_histogram
-        self.histograms = self.raw_histograms
+        # Calculate transmission fraction [0, 1] for each sample (sum of the raw histogram)
+        self.transmissions = self.raw_histograms.sum(axis=1)
+        
+        # Normalize histograms to be true probability distributions (sum to 1.0)
+        sum_val = self.raw_histograms.sum(axis=1, keepdims=True)
+        # Avoid division by zero for zero-transmission samples
+        self.histograms = self.raw_histograms / np.where(sum_val == 0.0, 1.0, sum_val)
         
     def __len__(self):
         return len(self.voltages)
         
     def __getitem__(self, idx):
-        # Returns (voltages_tensor, histogram_tensor)
+        # Returns (voltages_tensor, probability_distribution_tensor, transmission_tensor)
         return (
             torch.tensor(self.voltages[idx], dtype=torch.float32),
-            torch.tensor(self.histograms[idx], dtype=torch.float32)
+            torch.tensor(self.histograms[idx], dtype=torch.float32),
+            torch.tensor(self.transmissions[idx], dtype=torch.float32)
         )
         
     def denormalize_voltages(self, norm_volts):

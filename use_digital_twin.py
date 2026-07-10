@@ -19,7 +19,7 @@ sys.path.append(str(ROOT_DIR / "src" / "phase_3_control"))
 # Try importing modules
 try:
     from vae import VAE
-    from model import ForwardRegressor, FullEmulator
+    from model import ForwardRegressor, FullEmulator, TransmissionRegressor
     from inverse_estimator import InverseEstimator
     from dataset import BeamlineDataset, run_single_simulation, build_histogram, OPTIMIZE
 except ImportError as e:
@@ -34,15 +34,17 @@ class DigitalTwin:
     def __init__(self):
         # Force CPU device for maximum portability (unless CUDA is explicitly desired)
         self.device = torch.device("cpu")
+        self.latent_dim = 4
         
         # Paths
         self.dataset_path = ROOT_DIR / "Hackathon_student" / "beamline_dataset.npz"
         self.vae_weights = ROOT_DIR / "src" / "phase_1_VAE" / "vae_model.pt"
         self.regressor_weights = ROOT_DIR / "src" / "phase_2_DNN" / "forward_regressor.pt"
+        self.transmission_weights = ROOT_DIR / "src" / "phase_2_DNN" / "transmission_regressor.pt"
         self.inverse_weights = ROOT_DIR / "src" / "phase_3_control" / "inverse_estimator.pt"
         
         # Verify weight files exist
-        for path in [self.dataset_path, self.vae_weights, self.regressor_weights, self.inverse_weights]:
+        for path in [self.dataset_path, self.vae_weights, self.regressor_weights, self.transmission_weights, self.inverse_weights]:
             if not path.exists():
                 raise FileNotFoundError(f"Required file not found: {path.name}. Please ensure model weights have been trained.")
                 
@@ -50,30 +52,36 @@ class DigitalTwin:
         self.dataset = BeamlineDataset(str(self.dataset_path))
         
         # Load VAE (Phase 1)
-        self.vae = VAE(input_dim=400, latent_dim=2).to(self.device)
+        self.vae = VAE(input_dim=400, latent_dim=self.latent_dim).to(self.device)
         self.vae.load_state_dict(torch.load(self.vae_weights, map_location=self.device))
         self.vae.eval()
         
         # Load Forward Regressor (Phase 2, y -> z)
-        self.forward_reg = ForwardRegressor(input_dim=8, latent_dim=2).to(self.device)
+        self.forward_reg = ForwardRegressor(input_dim=8, latent_dim=self.latent_dim).to(self.device)
         self.forward_reg.load_state_dict(torch.load(self.regressor_weights, map_location=self.device))
         self.forward_reg.eval()
         
+        # Load Transmission Regressor (Phase 2, y -> T)
+        self.transmission_reg = TransmissionRegressor(input_dim=8).to(self.device)
+        self.transmission_reg.load_state_dict(torch.load(self.transmission_weights, map_location=self.device))
+        self.transmission_reg.eval()
+        
         # Load Inverse Estimator (Phase 3, z -> y)
-        self.inverse_est = InverseEstimator(latent_dim=2, output_dim=8).to(self.device)
+        self.inverse_est = InverseEstimator(latent_dim=self.latent_dim, output_dim=8).to(self.device)
         self.inverse_est.load_state_dict(torch.load(self.inverse_weights, map_location=self.device))
         self.inverse_est.eval()
         
         # Combined Full Emulator (y -> X_hat)
-        self.emulator = FullEmulator(self.forward_reg, self.vae.decoder).to(self.device)
+        self.emulator = FullEmulator(self.forward_reg, self.vae.decoder, self.transmission_reg).to(self.device)
         self.emulator.eval()
         
         # Fit KDE density filter on the training latent space
         self._fit_density_filter()
 
     def _fit_density_filter(self):
-        """Fits Kernel Density Estimator (KDE) on training latent space coordinates."""
-        histograms_t = torch.tensor(self.dataset.histograms, dtype=torch.float32, device=self.device)
+        """Fits Kernel Density Estimator (KDE) on training latent space coordinates of valid hit samples."""
+        has_hits_idx = np.where(self.dataset.transmissions > 0.0)[0]
+        histograms_t = torch.tensor(self.dataset.histograms[has_hits_idx], dtype=torch.float32, device=self.device)
         with torch.no_grad():
             true_z, _ = self.vae.encoder(histograms_t)
             true_z = true_z.numpy()
@@ -82,8 +90,9 @@ class DigitalTwin:
         self.z_min = true_z.min(axis=0)
         self.z_max = true_z.max(axis=0)
         
-        # Fit KDE with optimal bandwidth
-        self.kde = KernelDensity(kernel='gaussian', bandwidth=0.3).fit(true_z)
+        # Fit KDE with bandwidth scaled by dimension to avoid curse of dimensionality
+        bandwidth = 0.3 * np.sqrt(self.latent_dim / 2.0)
+        self.kde = KernelDensity(kernel='gaussian', bandwidth=bandwidth).fit(true_z)
         self.threshold = np.percentile(self.kde.score_samples(true_z), 5)
 
     def is_physical_state(self, z):
@@ -142,10 +151,17 @@ class DigitalTwin:
         Inverse Setpoint: Target Profile -> Inverse Estimator + Backpropagation -> Voltages.
         Does NOT require SIMION.
         """
-        # 1. Encode target profile to latent z
+        # 1. Convert and normalize target profile for VAE encoder
+        target_sum = target_profile.sum()
+        normalized_target = target_profile / (target_sum if target_sum > 0 else 1.0)
+        norm_target_t = torch.tensor(normalized_target, dtype=torch.float32, device=self.device).view(1, -1)
+        
+        # 1b. Keep the unnormalized target_t for MSE loss during voltage refinement
         target_t = torch.tensor(target_profile, dtype=torch.float32, device=self.device).view(1, -1)
+        
+        # 2. Encode to latent z using shape-normalized profile
         with torch.no_grad():
-            z_target, _ = self.vae.encoder(target_t)
+            z_target, _ = self.vae.encoder(norm_target_t)
             z_target_np = z_target.squeeze(0).numpy()
             
         # 2. Check and project z if it is out-of-distribution (low density)
@@ -193,28 +209,43 @@ class DigitalTwin:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction="maximize")
         
-        z1_range = self.z_max[0] - self.z_min[0]
-        z2_range = self.z_max[1] - self.z_min[1]
-        z1_min, z1_max = self.z_min[0] - 0.1 * z1_range, self.z_max[0] + 0.1 * z1_range
-        z2_min, z2_max = self.z_min[1] - 0.1 * z2_range, self.z_max[1] + 0.1 * z2_range
+        # Warm-start / Seed study with the coordinates of the top 5 highest-transmission training samples
+        has_hits_idx = np.where(self.dataset.transmissions > 0.0)[0]
+        if len(has_hits_idx) > 0:
+            top_indices = has_hits_idx[np.argsort(self.dataset.transmissions[has_hits_idx])[::-1][:5]]
+            with torch.no_grad():
+                histograms_t = torch.tensor(self.dataset.histograms[top_indices], dtype=torch.float32, device=self.device)
+                top_z, _ = self.vae.encoder(histograms_t)
+                top_z = top_z.cpu().numpy()
+            for z_seed in top_z:
+                trial_params = {f"z{i}": float(z_seed[i]) for i in range(self.latent_dim)}
+                study.enqueue_trial(trial_params)
+        
+        z_ranges = np.maximum(1e-5, self.z_max - self.z_min)
         
         def objective(trial):
-            z1 = trial.suggest_float("z1", z1_min, z1_max)
-            z2 = trial.suggest_float("z2", z2_min, z2_max)
-            z = [z1, z2]
+            z = []
+            for i in range(self.latent_dim):
+                zi = trial.suggest_float(
+                    f"z{i}", 
+                    self.z_min[i] - 0.1 * z_ranges[i], 
+                    self.z_max[i] + 0.1 * z_ranges[i]
+                )
+                z.append(zi)
             
             is_valid, _ = self.is_physical_state(z)
             if not is_valid:
                 return -1.0
                 
-            # Decode and score transmission
+            # Decode and score transmission using transmission regressor
             z_t = torch.tensor(z, dtype=torch.float32, device=self.device).view(1, -1)
             with torch.no_grad():
-                x_hat = self.vae.decoder(z_t)
-            return float(torch.sum(x_hat).item())
+                norm_voltages = self.inverse_est(z_t)
+                T = self.transmission_reg(norm_voltages).item()
+            return float(T)
 
         study.optimize(objective, n_trials=n_trials)
-        best_z = [study.best_params["z1"], study.best_params["z2"]]
+        best_z = [study.best_params[f"z{i}"] for i in range(self.latent_dim)]
         
         # Infer voltages
         best_z_t = torch.tensor(best_z, dtype=torch.float32, device=self.device).view(1, -1)
@@ -310,7 +341,8 @@ def main():
         profile, trans, spread, z = dt.predict_profile(args.voltages)
         
         print("\n--- Resultados Predichos ---")
-        print(f"Coordenadas Latentes z:   [{z[0]:.4f}, {z[1]:.4f}]")
+        coords_str = ", ".join(f"{coord:+.4f}" for coord in z)
+        print(f"Coordenadas Latentes z:   [{coords_str}]")
         print(f"Transmisión Estimada:      {trans*100:.2f}% ({int(trans*500)}/500 iones)")
         print(f"Dispersión del Haz (Foco): {spread:.4f}")
         

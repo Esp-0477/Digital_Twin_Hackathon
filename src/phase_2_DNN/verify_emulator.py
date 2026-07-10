@@ -21,7 +21,7 @@ def verify():
     regressor_weights_path = CURRENT_DIR / "forward_regressor.pt"
     
     # 2. Instantiate and load VAE
-    vae_model = VAE(input_dim=400, latent_dim=2).to(device)
+    vae_model = VAE(input_dim=400, latent_dim=4).to(device)
     try:
         vae_model.load_state_dict(torch.load(vae_weights_path, map_location=device))
         print("Loaded VAE model weights.")
@@ -30,7 +30,7 @@ def verify():
         return
         
     # 3. Instantiate and load ForwardRegressor
-    regressor = ForwardRegressor(input_dim=8, latent_dim=2).to(device)
+    regressor = ForwardRegressor(input_dim=8, latent_dim=4).to(device)
     try:
         regressor.load_state_dict(torch.load(regressor_weights_path, map_location=device))
         print("Loaded Forward Regressor weights.")
@@ -38,8 +38,19 @@ def verify():
         print(f"Error: Regressor weights not found at {regressor_weights_path}. Please train the Regressor first.")
         return
         
+    # 3b. Instantiate and load TransmissionRegressor
+    from model import TransmissionRegressor
+    trans_reg = TransmissionRegressor(input_dim=8).to(device)
+    trans_weights_path = CURRENT_DIR / "transmission_regressor.pt"
+    try:
+        trans_reg.load_state_dict(torch.load(trans_weights_path, map_location=device))
+        print("Loaded Transmission Regressor weights.")
+    except FileNotFoundError:
+        print("Warning: Transmission Regressor weights not found. Running validation without transmission scaling.")
+        trans_reg = None
+        
     # 4. Construct Full Emulator
-    emulator = FullEmulator(regressor, vae_model.decoder).to(device)
+    emulator = FullEmulator(regressor, vae_model.decoder, trans_reg).to(device)
     emulator.eval()
     
     # 5. Define a mock input voltage setting

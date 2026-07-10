@@ -10,14 +10,18 @@ sys.path.append(str(CURRENT_DIR / "phase_3_control"))
 
 def main():
     print("==========================================")
-    # 1. Update dataset
-    print("Step 1: Running LHS and Local Perturbations Data Collection...")
-    collect_script = CURRENT_DIR / "phase_1_VAE" / "collect_all_real_data.py"
-    subprocess.run([sys.executable, str(collect_script)], check=True)
-    
     # Paths
     dataset_file = CURRENT_DIR.parent / "Hackathon_student" / "beamline_dataset.npz"
     vae_weights = CURRENT_DIR / "phase_1_VAE" / "vae_model.pt"
+    
+    # 1. Update dataset
+    print("Step 1: Checking for existing dataset...")
+    if dataset_file.exists():
+        print(f"  Dataset found at {dataset_file.name}. Skipping SIMION collection step.")
+    else:
+        print("  Dataset not found. Running LHS and Local Perturbations Data Collection...")
+        collect_script = CURRENT_DIR / "phase_1_VAE" / "collect_all_real_data.py"
+        subprocess.run([sys.executable, str(collect_script)], check=True)
     
     # 2. Retrain VAE
     print("\nStep 2: Retraining Variational Autoencoder (VAE)...")
@@ -26,21 +30,27 @@ def main():
         data_path=str(dataset_file),
         epochs=1200,      # Slightly more epochs for better learning
         batch_size=8,
-        latent_dim=2,
+        latent_dim=4,
         kl_beta=0.005,
         save_model_name="vae_model.pt"
     )
     
-    # 3. Retrain Forward Regressor
-    print("\nStep 3: Retraining Forward Regressor...")
-    from train_dnn import train_forward_regressor
+    # 3. Retrain Forward Regressor and Transmission Regressor
+    print("\nStep 3: Retraining Forward Regressor and Transmission Regressor...")
+    from train_dnn import train_forward_regressor, train_transmission_regressor
     train_forward_regressor(
         dataset_path=str(dataset_file),
         vae_weights_path=str(vae_weights),
         epochs=200,
         batch_size=8,
-        latent_dim=2,
+        latent_dim=4,
         save_regressor_name="forward_regressor.pt"
+    )
+    train_transmission_regressor(
+        dataset_path=str(dataset_file),
+        epochs=200,
+        batch_size=8,
+        save_regressor_name="transmission_regressor.pt"
     )
     
     # 4. Train Inverse Estimator
@@ -51,7 +61,7 @@ def main():
         vae_weights_path=str(vae_weights),
         epochs=250,
         batch_size=8,
-        latent_dim=2,
+        latent_dim=4,
         save_model_name="inverse_estimator.pt"
     )
     

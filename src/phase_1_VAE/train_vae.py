@@ -17,7 +17,7 @@ def train_vae(
     epochs=100,
     batch_size=8,
     learning_rate=1e-3,
-    latent_dim=2,
+    latent_dim=4,
     kl_beta=0.1,
     save_model_name="vae_model.pt"
 ):
@@ -36,31 +36,26 @@ def train_vae(
     if dataset_size < 5:
         print("Warning: Dataset is very small. Training might overfit or fail.")
         
-    # Split into train and validation sets (80% train, 20% val)
-    val_size = max(1, int(dataset_size * 0.2))
-    train_size = dataset_size - val_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    # Filter dataset to only include trials with hits (transmission > 0)
+    has_hits_idx = np.where(dataset.transmissions > 0.0)[0]
+    print(f"Total dataset trials: {dataset_size}")
+    print(f"Trials with hits (transmission > 0) for VAE training: {len(has_hits_idx)}")
     
-    # Balance training dataset by oversampling positive hit samples to avoid majority class collapse
-    train_indices = train_dataset.indices
-    train_histograms = dataset.histograms[train_indices]
-    train_transmissions = train_histograms.sum(axis=1) * 500
-    has_hits_idx = np.where(train_transmissions > 0)[0]
-    no_hits_idx = np.where(train_transmissions == 0)[0]
-    
-    if len(has_hits_idx) > 0:
-        num_repeats = int(len(no_hits_idx) / len(has_hits_idx)) + 1
-        repeated_hits = np.repeat(has_hits_idx, num_repeats)
-        balanced_train_subindices = np.concatenate([no_hits_idx, repeated_hits])
-        balanced_train_indices = [train_indices[i] for i in balanced_train_subindices]
-    else:
-        balanced_train_indices = train_indices
+    if len(has_hits_idx) < 5:
+        print("Warning: Dataset has extremely few hits. VAE training will likely overfit.")
         
     from torch.utils.data import Subset
-    balanced_train_dataset = Subset(dataset, balanced_train_indices)
+    hit_dataset = Subset(dataset, has_hits_idx)
+    hit_dataset_size = len(hit_dataset)
+    
+    # Split into train and validation sets (80% train, 20% val)
+    val_size = max(1, int(hit_dataset_size * 0.2))
+    train_size = hit_dataset_size - val_size
+    train_dataset, val_dataset = random_split(hit_dataset, [train_size, val_size])
     
     # Data loaders
-    train_loader = DataLoader(balanced_train_dataset, batch_size=min(batch_size, len(balanced_train_dataset)), shuffle=True)
+    drop_last = (train_size % batch_size == 1) and train_size > 1
+    train_loader = DataLoader(train_dataset, batch_size=min(batch_size, train_size), shuffle=True, drop_last=drop_last)
     val_loader = DataLoader(val_dataset, batch_size=min(batch_size, val_size), shuffle=False)
     
     # Initialize model
@@ -79,19 +74,14 @@ def train_vae(
         train_recon = 0.0
         train_kl = 0.0
         
-        for _, histograms in train_loader:
+        for _, histograms, _ in train_loader:
             histograms = histograms.to(device)
             
             # Forward pass
             x_hat, mu, logvar = model(histograms)
             
-            # Binary Cross Entropy loss (BCE) to prevent posterior collapse
-            import torch.nn.functional as F
-            recon_loss = F.binary_cross_entropy(x_hat, histograms, reduction='sum') / histograms.size(0)
-            
-            # KL loss
-            kl_loss = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
-            loss = recon_loss + kl_beta * kl_loss
+            # Use the updated vae_loss_fn (uses Cross-Entropy for distribution matching)
+            loss, recon_loss, kl_loss = vae_loss_fn(x_hat, histograms, mu, logvar, kl_beta=kl_beta)
             
             # Backward pass
             optimizer.zero_grad()
@@ -113,16 +103,11 @@ def train_vae(
         val_kl = 0.0
         
         with torch.no_grad():
-            for _, histograms in val_loader:
+            for _, histograms, _ in val_loader:
                 histograms = histograms.to(device)
                 x_hat, mu, logvar = model(histograms)
                 
-                # Use same BCE loss structure for validation monitoring
-                import torch.nn.functional as F
-                recon_loss = F.binary_cross_entropy(x_hat, histograms, reduction='sum') / histograms.size(0)
-                
-                kl_loss = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
-                loss = recon_loss + kl_beta * kl_loss
+                loss, recon_loss, kl_loss = vae_loss_fn(x_hat, histograms, mu, logvar, kl_beta=kl_beta)
                 
                 val_loss += loss.item() * histograms.size(0)
                 val_recon += recon_loss.item() * histograms.size(0)
@@ -134,8 +119,8 @@ def train_vae(
         
         if epoch % max(1, epochs // 10) == 0 or epoch == 1 or epoch == epochs:
             print(f"Epoch {epoch:03d}/{epochs:03d} | "
-                  f"Train Loss: {train_loss:.6f} (Weighted Recon: {train_recon:.6f}, KL: {train_kl:.6f}) | "
-                  f"Val Loss: {val_loss:.6f} (Weighted Recon: {val_recon:.6f}, KL: {val_kl:.6f})")
+                  f"Train Loss: {train_loss:.6f} (Recon CE: {train_recon:.6f}, KL: {train_kl:.6f}) | "
+                  f"Val Loss: {val_loss:.6f} (Recon CE: {val_recon:.6f}, KL: {val_kl:.6f})")
             
         # Save best model
         if val_loss < best_val_loss:
@@ -148,4 +133,4 @@ def train_vae(
 
 if __name__ == "__main__":
     dataset_file = CURRENT_DIR.parent.parent / "Hackathon_student" / "beamline_dataset.npz"
-    train_vae(str(dataset_file), epochs=1000, batch_size=8, latent_dim=2, kl_beta=0.005)
+    train_vae(str(dataset_file), epochs=1000, batch_size=8, latent_dim=4, kl_beta=0.005)
